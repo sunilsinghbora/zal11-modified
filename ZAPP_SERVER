@@ -1,0 +1,67 @@
+*&--------------------------------------------------------------------------*
+*& Report ZAPP_SERVER                                                       *
+*&--------------------------------------------------------------------------*
+*& Object             :  ZAPP_SERVER                                        *
+*& Created by         :  Sunil Singh Bora                                   *
+*& POC                :  sunilbora@microsoft.com                            *
+*& Date               :  01/01/2026                                         *
+*& Description        :  Enhanced AL11 File Manager - Dynpro-Free Version   *
+*&                       Navigate local & remote folders with GUI interface *
+*&                       Upload/Download files, Manage files & folders      *
+*&                       Compress/Uncompress, CHMOD, Drag & Drop support    *
+*&--------------------------------------------------------------------------*
+*&                      ORIGINAL CODE CREDITS                               *
+*&--------------------------------------------------------------------------*
+*& Original Program   :  ZAL11 (Custom AL11)                                *
+*& Original Author    :  S. Hermann                                         *
+*& Original Website   :  http://quelquepart.biz                             *
+*& Original Version   :  2.4.3                                              *
+*& Original Date      :  28. 11.2016                                        *
+*&--------------------------------------------------------------------------*
+*& Refactoring Notes:                                                       *
+*&   - Removed dependency on Dynpro screens (100, 200)                      *
+*&   - Replaced CL_GUI_CUSTOM_CONTAINER with CL_GUI_DOCKING_CONTAINER       *
+*&   - Replaced CHMOD screen with CL_GUI_DIALOGBOX_CONTAINER                *
+*&   - Added Microsoft logo header using CL_GUI_PICTURE                     *
+*&   - All original functionality preserved                                 *
+*&--------------------------------------------------------------------------*
+*                       Modification History                                *
+*------------|---------------|----------|------------|----------------------*
+*  Date      | USER ID       |  ADO     | Transport  | Remarks              *
+*------------|---------------|----------|------------|----------------------*
+* 01/16/2026 | SUNILBORA     |  N/A     | N/A        | Initial refactoring  *
+*            |               |          |            | to remove dynpros    *
+*------------|---------------|----------|------------|----------------------*
+*&--------------------------------------------------------------------------*
+*& Original Version History (from S. Hermann):                              *
+*&--------------------------------------------------------------------------*
+*&--------------------------------------------------------------------------*
+*& Features:                                                                *
+*&   - Navigate in remote folders with graphic interface                    *
+*&   - Sort & filter remote file/folder listings                            *
+*&   - Open remote file with default application or text editor             *
+*&   - Upload/download files by button or drag & drop                       *
+*&   - Manage file and folder (create, rename, remove, copy, move)          *
+*&   - Open server shortcut & path from clipboard                           *
+*&   - Manage server shortcuts (create & delete)                            *
+*&   - Copy path (server/local) to clipboard                                *
+*&   - Compress remote file (TAR+BZ2 on Unix, ZIP on Windows)               *
+*&   - Uncompress remote file (ZIP, TAR, GZ, BZ2)                           *
+*&   - CHMOD on file/folder (Unix) / ATTRIB (Windows)                       *
+*&   - Access to remote server //servername/path/                           *
+*&--------------------------------------------------------------------------*
+*& Technical Notes:                                                         *
+*&   - Runs without dynpro using CL_GUI_DOCKING_CONTAINER                   *
+*&   - Designed for Windows local PC and Unix/Linux or Windows server       *
+*&   - Uses shared memory to remember last used folders                     *
+*&--------------------------------------------------------------------------*
+REPORT zapp_server.
+
+INCLUDE zapp_top.
+INCLUDE zapp_cls.
+INCLUDE zapp_sub.
+
+START-OF-SELECTION.
+  PERFORM init_auth.
+  PERFORM init_screen.
+  PERFORM write.
