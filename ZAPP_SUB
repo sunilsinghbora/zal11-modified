@@ -1,0 +1,3782 @@
+*&---------------------------------------------------------------------*
+*& Include          ZAPP_SUB
+*&---------------------------------------------------------------------*
+*######################################################################*
+*
+*                             FORM SECTION
+*
+*######################################################################*
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_SCREEN
+*&---------------------------------------------------------------------*
+*       Initialize all objects of the screen using docking container
+*----------------------------------------------------------------------*
+FORM init_screen.
+
+* Init server
+  IF sy-opsys(3) = 'Win' OR sy-opsys(3) = 'WIN'
+  OR sy-opsys CS 'Windows'.
+    CREATE OBJECT o_server_command TYPE lcl_windows_server.
+  ELSE.
+    CREATE OBJECT o_server_command TYPE lcl_aix_server.
+  ENDIF.
+
+* Init shared memory variable
+  CONCATENATE 'ZAL11_L_' sy-uname INTO w_shared_dir_local.
+  CONCATENATE 'ZAL11_R_' sy-uname INTO w_shared_dir_remote.
+
+* Create the handle object (required to catch events)
+  CREATE OBJECT o_handle_event.
+
+* Create docking container instead of custom container
+  CREATE OBJECT o_docking_container
+    EXPORTING
+      side                        = cl_gui_docking_container=>dock_at_left
+      extension                   = 2000
+      no_autodef_progid_dynnr     = abap_true
+    EXCEPTIONS
+      cntl_error                  = 1
+      cntl_system_error           = 2
+      create_error                = 3
+      lifetime_error              = 4
+      lifetime_dynpro_dynpro_link = 5
+      OTHERS                      = 6.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error creating docking container' TYPE 'E'.
+  ENDIF.
+
+* Split the screen into 4 parts
+  PERFORM init_splitter.
+
+* Fill first part with a tree of the local folders
+  PERFORM init_tree1.
+
+* Fill second part with an ALV grid of the local folder content
+  PERFORM init_detail1.
+
+* Try to open last used nodes
+  IMPORT w_path FROM SHARED BUFFER indx(st) ID w_shared_dir_local.
+  IF sy-subrc = 0 AND NOT w_path IS INITIAL.
+    PERFORM goto_shortcut_local USING w_path.
+  ELSE.
+* Open first local drive (content is displayed in the alv grid)
+    READ TABLE t_nodes1 INTO s_node INDEX 2.
+    IF sy-subrc = 0.
+      CALL METHOD o_tree1->set_selected_node
+        EXPORTING
+          node_key = s_node-node_key.
+      PERFORM change_local_folder USING s_node-node_key.
+    ELSE.
+      MESSAGE 'Please allow SAP to access to your local files'(e24)
+              TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    ENDIF.
+  ENDIF.
+
+* Get the root path for the user
+  PERFORM init_root_path.
+
+* Fill third part with a tree of the remote folders
+  PERFORM init_tree2.
+
+* Fill last part with an ALV grid of the remote folder content
+  PERFORM init_detail2.
+
+* Get list of distant server and add them to tree
+  PERFORM get_server_link.
+
+* Try to open last used nodes
+  IMPORT w_path FROM SHARED BUFFER indx(st) ID w_shared_dir_remote.
+  IF sy-subrc = 0 AND NOT w_path IS INITIAL
+  AND NOT w_path = s_customize-root_path.
+    PERFORM goto_shortcut USING w_path 2 space.
+  ELSE.
+* Open root node (content is displayed in the alv grid)
+    CALL METHOD o_tree2->set_selected_node
+      EXPORTING
+        node_key = 'ROOT'.
+    PERFORM change_remote_folder USING 'ROOT'.
+  ENDIF.
+
+ENDFORM.
+
+FORM write.
+* Keep the program running for event processing
+  WRITE:  / ' '.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  INIT_SPLITTER
+*&---------------------------------------------------------------------*
+*       Split the main screen into 4 parts
+*----------------------------------------------------------------------*
+FORM init_splitter.
+
+* Insert splitter into the docking container
+  CREATE OBJECT o_splitter
+    EXPORTING
+      parent  = o_docking_container
+      rows    = 2
+      columns = 1.
+
+* Get the first row of the main splitter
+  CALL METHOD o_splitter->get_container
+    EXPORTING
+      row       = 1
+      column    = 1
+    RECEIVING
+      container = o_container_h.
+
+* Spliter for the high part (first row)
+  CREATE OBJECT o_splitter_h
+    EXPORTING
+      parent  = o_container_h
+      rows    = 1
+      columns = 2.
+
+* Affect an object to each "cell" of the high sub splitter
+  CALL METHOD o_splitter_h->get_container
+    EXPORTING
+      row       = 1
+      column    = 1
+    RECEIVING
+      container = o_container_tree1.
+
+  CALL METHOD o_splitter_h->get_container
+    EXPORTING
+      row       = 1
+      column    = 2
+    RECEIVING
+      container = o_container_detail1.
+
+* Get the second row of the main splitter
+  CALL METHOD o_splitter->get_container
+    EXPORTING
+      row       = 2
+      column    = 1
+    RECEIVING
+      container = o_container_l.
+
+* Spliter for the low part (second row)
+  CREATE OBJECT o_splitter_l
+    EXPORTING
+      parent  = o_container_l
+      rows    = 1
+      columns = 2.
+
+* Affect an object to each "cell" of the low sub splitter
+  CALL METHOD o_splitter_l->get_container
+    EXPORTING
+      row       = 1
+      column    = 1
+    RECEIVING
+      container = o_container_tree2.
+
+  CALL METHOD o_splitter_l->get_container
+    EXPORTING
+      row       = 1
+      column    = 2
+    RECEIVING
+      container = o_container_detail2.
+
+* Set first col initial size to 20%
+  CALL METHOD o_splitter_h->set_column_width
+    EXPORTING
+      id    = 1
+      width = 20.
+  CALL METHOD o_splitter_l->set_column_width
+    EXPORTING
+      id    = 1
+      width = 20.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_TREE1
+*&---------------------------------------------------------------------*
+*       Initialize local tree
+*----------------------------------------------------------------------*
+FORM init_tree1.
+  DATA: lt_event  TYPE cntl_simple_events,
+        ls_event  TYPE cntl_simple_event,
+        lw_effect TYPE i.
+
+* Create a tree control
+  CREATE OBJECT o_tree1
+    EXPORTING
+      parent              = o_container_tree1
+      node_selection_mode = cl_gui_simple_tree=>node_sel_mode_single
+    EXCEPTIONS
+      lifetime_error      = 1
+      cntl_system_error   = 2
+      create_error        = 3
+      failed              = 4
+      OTHERS              = 5.
+  IF sy-subrc <> 0.
+    MESSAGE a000(tree_control_msg).
+  ENDIF.
+
+* Catch selection to open folder content
+  ls_event-eventid = cl_gui_simple_tree=>eventid_selection_changed.
+  ls_event-appl_event = abap_true.
+  APPEND ls_event TO lt_event.
+
+  CALL METHOD o_tree1->set_registered_events
+    EXPORTING
+      events                    = lt_event
+    EXCEPTIONS
+      cntl_error                = 1
+      cntl_system_error         = 2
+      illegal_event_combination = 3.
+  IF sy-subrc <> 0.
+    MESSAGE a000(tree_control_msg).
+  ENDIF.
+
+* Assign event handlers in the application class to each desired event
+  SET HANDLER o_handle_event->handle_select FOR o_tree1.
+  SET HANDLER o_handle_event->handle_local_tree_drop FOR o_tree1.
+
+* Define drag&drop type allowed (copy and move)
+  lw_effect = cl_dragdrop=>copy.
+  CREATE OBJECT o_dragdrop_tree1.
+  CALL METHOD o_dragdrop_tree1->add
+    EXPORTING
+      flavor     = 'LINE'
+      dragsrc    = space
+      droptarget = abap_true
+      effect     = lw_effect.
+  CALL METHOD o_dragdrop_tree1->get_handle
+    IMPORTING
+      handle = w_handle_tree1.
+
+* Initialize local tree content
+  CLEAR w_node1_count.
+  PERFORM init_local_dir.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_LOCAL_DIR
+*&---------------------------------------------------------------------*
+*       Initialize local tree content
+*----------------------------------------------------------------------*
+FORM init_local_dir.
+  DATA : lw_pcname       TYPE string,
+         lw_special_path TYPE string.
+
+  REFRESH t_nodes1.
+
+* Get the name of the local PC
+  CALL METHOD cl_gui_frontend_services=>get_computer_name
+    CHANGING
+      computer_name        = lw_pcname
+    EXCEPTIONS
+      cntl_error           = 1
+      error_no_gui         = 2
+      not_supported_by_gui = 3
+      OTHERS               = 4.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+  CALL METHOD cl_gui_cfw=>flush.
+
+* Get list of local drive letters
+  PERFORM init_local_drives.
+
+* Node with key 'Root'
+  CLEAR s_node.
+  s_node-node_key = 'ROOT'.
+  s_node-hidden = space.
+  s_node-disabled = space.
+  s_node-isfolder = abap_true.
+  s_node-read = abap_true.
+  s_node-n_image = s_node-exp_image = '@MV@'.
+  CONCATENATE 'Local PC'(c01) lw_pcname INTO s_node-text
+              SEPARATED BY space.
+  APPEND s_node TO t_nodes1.
+
+* Add Desktop folder
+  PERFORM get_windows_special_folders USING 'Desktop'
+                                      CHANGING lw_special_path.
+  IF NOT lw_special_path IS INITIAL.
+    CLEAR s_node.
+    s_node-node_key = 'DESKTOP'.
+    s_node-relatkey = 'ROOT'.
+    s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+    s_node-isfolder = abap_true.
+    s_node-text = 'Desktop'(h32).
+    s_node-n_image = s_node-exp_image = '@JF@'.
+    CONCATENATE lw_special_path c_local_slash INTO s_node-path.
+    s_node-dragdropid = w_handle_tree1.
+    APPEND s_node TO t_nodes1.
+  ENDIF.
+
+* Add my Documents folder
+  PERFORM get_windows_special_folders USING 'Personal'
+                                      CHANGING lw_special_path.
+  IF NOT lw_special_path IS INITIAL.
+    CLEAR s_node.
+    s_node-node_key = 'MYDOC'.
+    s_node-relatkey = 'ROOT'.
+    s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+    s_node-isfolder = abap_true.
+    s_node-text = 'My Documents'(h33).
+    s_node-n_image = s_node-exp_image = '@F8@'.
+    CONCATENATE lw_special_path c_local_slash INTO s_node-path.
+    s_node-dragdropid = w_handle_tree1.
+    APPEND s_node TO t_nodes1.
+  ENDIF.
+
+* Define each drive as child of the 'ROOT' node
+  LOOP AT t_drives INTO s_drive.
+    CLEAR s_node.
+    s_node-node_key = s_drive-drive.
+    s_node-relatkey = 'ROOT'.
+    s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+    s_node-isfolder = abap_true.
+    s_node-text = s_drive-desc.
+    s_node-path(1) = s_drive-drive.
+    s_node-path+1 = ':\'.
+    CASE s_drive-type.
+      WHEN c_drivetype_hdd.
+        s_node-n_image = s_node-exp_image = '@4V@'.
+      WHEN c_drivetype_cd.
+        s_node-n_image = s_node-exp_image = '@4W@'.
+      WHEN c_drivetype_remote.
+        s_node-n_image = s_node-exp_image = '@53@'.
+      WHEN c_drivetype_usb.
+        s_node-n_image = s_node-exp_image = '@63@'.
+      WHEN OTHERS.
+    ENDCASE.
+    s_node-dragdropid = w_handle_tree1.
+    APPEND s_node TO t_nodes1.
+  ENDLOOP.
+
+  CALL METHOD o_tree1->add_nodes
+    EXPORTING
+      table_structure_name           = 'MTREESNODE'
+      node_table                     = t_nodes1
+    EXCEPTIONS
+      failed                         = 1
+      error_in_node_table            = 2
+      dp_error                       = 3
+      table_structure_name_not_found = 4
+      OTHERS                         = 5.
+  IF sy-subrc <> 0.
+    MESSAGE a000(tree_control_msg).
+  ENDIF.
+
+* Expand the root node to display all drives in the tree
+  CALL METHOD o_tree1->expand_root_nodes.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  init_local_drives
+*&---------------------------------------------------------------------*
+*       Initialize list of local drive letters into t_drives
+*----------------------------------------------------------------------*
+FORM init_local_drives.
+  DATA : lw_abcde         TYPE syabcde,
+         lw_drivetemplate TYPE char3 VALUE ' :\',
+         lw_drivetotest   TYPE string,
+         lw_type          TYPE string.
+
+* Get all letters, remove AB which is assumed as floppy disk
+  lw_abcde = sy-abcde.
+  SHIFT lw_abcde BY 2 PLACES.
+  CONDENSE lw_abcde NO-GAPS.
+  CLEAR:  t_drives, s_drive.
+
+* Check if each letter is mounted
+  WHILE lw_abcde IS NOT INITIAL.
+    lw_drivetemplate(1) = lw_abcde(1).
+    lw_drivetotest = lw_drivetemplate.
+    SHIFT lw_abcde BY 1 PLACES.
+    CLEAR lw_type.
+* Get Drive Type
+    CALL METHOD cl_gui_frontend_services=>get_drive_type
+      EXPORTING
+        drive                = lw_drivetotest
+      CHANGING
+        drive_type           = lw_type
+      EXCEPTIONS
+        cntl_error           = 1
+        bad_parameter        = 2
+        error_no_gui         = 3
+        not_supported_by_gui = 4
+        OTHERS               = 5.
+    IF sy-subrc = 0.
+      CALL METHOD cl_gui_cfw=>flush.
+* If letter exist on local PC, get drive type
+      IF lw_type IS NOT INITIAL.
+        s_drive-drive = lw_drivetotest.
+        s_drive-type = lw_type.
+        CASE s_drive-type.
+          WHEN c_drivetype_hdd.
+            s_drive-desc = 'Local Disk (#: )'(c02).
+          WHEN c_drivetype_cd.
+            s_drive-desc = 'CDROM Drive (#:)'(c03).
+          WHEN c_drivetype_remote.
+            s_drive-desc = 'Remote Drive (#:)'(c04).
+          WHEN c_drivetype_usb.
+            s_drive-desc = 'Removable Drive (#:)'(c05).
+          WHEN OTHERS.
+            s_drive-desc = 'Unknown (#:)'(c06).
+        ENDCASE.
+        REPLACE c_wildcard WITH s_drive-drive(1) INTO s_drive-desc.
+        APPEND s_drive TO t_drives.
+      ENDIF.
+    ENDIF.
+  ENDWHILE.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_DETAIL1
+*&---------------------------------------------------------------------*
+*       Initialize local grid object
+*----------------------------------------------------------------------*
+FORM init_detail1.
+  DATA :  lw_effect TYPE i.
+
+* Create grid object
+  CREATE OBJECT o_grid1
+    EXPORTING
+      i_parent = o_container_detail1.
+
+* Set all grid event to handle
+  SET HANDLER o_handle_event->handle_grid_double_click FOR o_grid1.
+  SET HANDLER o_handle_event->handle_grid_context_local FOR o_grid1.
+  SET HANDLER o_handle_event->handle_user_command FOR o_grid1.
+  SET HANDLER o_handle_event->handle_grid_drag FOR o_grid1.
+  SET HANDLER o_handle_event->handle_local_grid_drop FOR o_grid1.
+
+  READ TABLE t_drives INTO s_drive INDEX 1.
+
+* Define drag&drop type allowed (copy and move)
+  lw_effect = cl_dragdrop=>move + cl_dragdrop=>copy.
+  CREATE OBJECT o_dragdrop_grid1.
+  CALL METHOD o_dragdrop_grid1->add
+    EXPORTING
+      flavor     = 'LINE'
+      dragsrc    = abap_true
+      droptarget = abap_true
+      effect     = lw_effect.
+  CALL METHOD o_dragdrop_grid1->get_handle
+    IMPORTING
+      handle = w_handle_grid1.
+
+* Fill config ALV var
+  PERFORM init_detail1_alv.
+
+* Set the grid config and content
+  CALL METHOD o_grid1->set_table_for_first_display
+    EXPORTING
+      is_layout       = s_layout_grid1
+    CHANGING
+      it_outtab       = t_details1
+      it_fieldcatalog = t_fieldcat_grid1[]
+      it_sort         = t_sort_grid1[].
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_local_FOLDER_DETAIL
+*&---------------------------------------------------------------------*
+*       Get list of files for a given local path
+*----------------------------------------------------------------------*
+FORM get_local_folder_detail USING pw_path TYPE c.
+
+  DATA: lt_files     TYPE STANDARD TABLE OF file_info,
+        ls_file      TYPE file_info,
+        lw_count     TYPE i,
+        lw_path_name TYPE string,
+        lw_fileupper LIKE ls_file-filename.
+
+  lw_path_name = pw_path.
+  REFRESH :  t_details1, lt_files.
+
+* Get Folders in a Given Directory
+  CALL METHOD cl_gui_frontend_services=>directory_list_files
+    EXPORTING
+      directory                   = lw_path_name
+    CHANGING
+      file_table                  = lt_files
+      count                       = lw_count
+    EXCEPTIONS
+      cntl_error                  = 1
+      directory_list_files_failed = 2
+      wrong_parameter             = 3
+      error_no_gui                = 4
+      not_supported_by_gui        = 5
+      OTHERS                      = 6.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+* if folder is not a root, add '. .' to go on parent dir
+  lw_count = strlen( lw_path_name ).
+  IF lw_count > 3.
+    CLEAR: s_detail1.
+    s_detail1-path = lw_path_name.
+    s_detail1-name = c_goto_parent_dir.
+    s_detail1-dir = 1.
+    s_detail1-icon = '@IH@'.
+    s_detail1-filetype = 'Directory'(c07).
+    APPEND s_detail1 TO t_details1.
+  ENDIF.
+
+* List content of the path
+  LOOP AT lt_files INTO ls_file.
+    CLEAR: s_detail1.
+    s_detail1-path = lw_path_name.
+    s_detail1-name = ls_file-filename.
+    s_detail1-dir = ls_file-isdir.
+* Add trash icon for windows recycle bin entry
+    lw_fileupper = ls_file-filename.
+    TRANSLATE lw_fileupper TO UPPER CASE.
+    IF lw_fileupper = '$RECYCLE. BIN'.
+      s_detail1-icon = '@11@'.
+      s_detail1-filetype = 'Trash bin'(c55).
+* Add folder icon for directories
+    ELSEIF ls_file-isdir = 1.
+      s_detail1-icon = '@IH@'.
+      s_detail1-filetype = 'Directory'(c07).
+    ELSE.
+* for files, get icon and default transfer mode
+      PERFORM get_filetype USING s_detail1-name
+                           CHANGING s_detail1-icon
+                                    s_detail1-filetype
+                                    s_detail1-filetransfermode.
+    ENDIF.
+    s_detail1-len = ls_file-filelength.
+    s_detail1-ctime = ls_file-createtime.
+    s_detail1-cdate = ls_file-createdate.
+    s_detail1-rdate = ls_file-accessdate.
+    s_detail1-rtime = ls_file-accesstime.
+    s_detail1-mdate = ls_file-writedate.
+    s_detail1-mtime = ls_file-writetime.
+    IF ls_file-isreadonly NE 0.
+      CONCATENATE s_detail1-attrs 'R' INTO s_detail1-attrs.
+    ENDIF.
+    IF ls_file-isarchived NE 0.
+      CONCATENATE s_detail1-attrs 'A' INTO s_detail1-attrs.
+    ENDIF.
+    IF ls_file-issystem NE 0.
+      CONCATENATE s_detail1-attrs 'S' INTO s_detail1-attrs.
+    ENDIF.
+    IF ls_file-ishidden NE 0.
+      CONCATENATE s_detail1-attrs 'H' INTO s_detail1-attrs.
+    ENDIF.
+    IF ls_file-iscompress NE 0.
+      CONCATENATE s_detail1-attrs 'C' INTO s_detail1-attrs.
+    ENDIF.
+    APPEND s_detail1 TO t_details1.
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_FILETYPE
+*&---------------------------------------------------------------------*
+*       For a given file, found his type and return icon, text and
+*       transfer mode
+*----------------------------------------------------------------------*
+FORM get_filetype  USING    pw_name TYPE c
+                   CHANGING pw_icon TYPE c
+                            pw_filetype TYPE c
+                            pw_filetransfermode TYPE c.
+  DATA : lw_ext(10),
+         lt_chunk   LIKE STANDARD TABLE OF lw_ext,
+         lw_count   TYPE i.
+
+  DEFINE set_type.
+    pw_icon = &1.
+    pw_filetransfermode = &2.
+    pw_filetype = &3.
+  END-OF-DEFINITION.
+
+  DEFINE set_type_gen.
+    pw_icon = &1.
+    pw_filetype = '# File'(c54).
+    REPLACE c_wildcard WITH lw_ext INTO pw_filetype.
+    CONDENSE pw_filetype.
+    pw_filetransfermode = c_bin.
+  END-OF-DEFINITION.
+
+* Get extension of the given file
+  SPLIT pw_name AT '.' INTO TABLE lt_chunk.
+  DESCRIBE TABLE lt_chunk LINES lw_count.
+  IF lw_count < 2.
+    CLEAR lw_ext.
+  ELSE.
+    READ TABLE lt_chunk INTO lw_ext INDEX lw_count.
+  ENDIF.
+  TRANSLATE lw_ext TO UPPER CASE.
+
+* find file type from extension
+  CASE lw_ext.
+    WHEN 'TXT'.
+      set_type '@EQ@' c_asc 'Text Document'(c08).
+    WHEN 'INI'.
+      set_type '@EQ@' c_asc 'Configuration Settings'(c09).
+    WHEN 'SAP'.
+      set_type '@E3@' c_bin 'SAP GUI Shortcut'(c10).
+    WHEN 'CFG'.
+      set_type '@EQ@' c_asc 'CFG File'(c11).
+    WHEN 'LOG'.
+      set_type '@DR@' c_asc 'Log File'(c12).
+    WHEN 'DOC' OR 'DOCX'.
+      set_type '@J7@' c_bin 'MS Word Document'(c13).
+    WHEN 'ITS'.
+      set_type '@IZ@' c_bin 'Internet Document Set'(c14).
+    WHEN 'INF'.
+      set_type '@9E@' c_bin 'Setup Information'(c15).
+    WHEN 'HTM' OR 'HTML'.
+      set_type '@J4@' c_bin 'HTML Document'(c16).
+    WHEN 'HTT'.
+      set_type '@IY@' c_bin 'HyperText Template'(c17).
+    WHEN 'URL'.
+      set_type '@8S@' c_bin 'Internet Shortcut'(c18).
+    WHEN 'XML'.
+      set_type '@IZ@' c_bin 'XML Document'(c19).
+    WHEN 'HLP' OR 'CFM'.
+      set_type '@5E@' c_bin 'Help File'(c20).
+    WHEN 'SYS'.
+      set_type '@O8@' c_bin 'System file'(c21).
+    WHEN 'CMD'.
+      set_type '@IF@' c_bin 'Windows Command Script'(c22).
+    WHEN 'CAT'.
+      set_type '@O8@' c_bin 'Security Catalog'(c23).
+    WHEN 'DLL'.
+      set_type '@O8@' c_bin 'Application Extension'(c24).
+    WHEN 'DRV'.
+      set_type '@O8@' c_bin 'Device driver'(c25).
+    WHEN 'TTF'.
+      set_type '@AI@' c_bin 'TrueType Font'(c26).
+    WHEN 'OLD'.
+      set_type '@DH@' c_bin 'OLD File'(c27).
+    WHEN 'SPC'.
+      set_type '@9P@' c_bin 'PKCS Certificates'(c28).
+    WHEN 'EXE'.
+      set_type '@9X@' c_bin 'Application'(c29).
+    WHEN 'BAT'.
+      set_type '@9U@' c_asc 'MS-DOS Batch File'(c30).
+    WHEN 'PPT'.
+      set_type '@J5@' c_bin 'MS PowerPoint Presentation'(c31).
+    WHEN 'DOT'.
+      set_type '@J6@' c_bin 'MS Word Template'(c32).
+    WHEN 'EML'.
+      set_type '@J8@' c_bin 'Outlook Mail Message'(c33).
+    WHEN 'RTF'.
+      set_type '@J9@' c_bin 'Rich Text Format'(c34).
+    WHEN 'PDF'.
+      set_type '@IT@' c_bin 'Adobe Acrobat Document'(c35).
+    WHEN 'TIF'.
+      set_type '@JA@' c_bin 'TIF Image Document'(c36).
+    WHEN 'ICO'.
+      set_type '@GZ@' c_bin 'Icon'(c37).
+    WHEN 'GIF'.
+      set_type '@IW@' c_bin 'GIF Image'(c38).
+    WHEN 'WRI'.
+      set_type '@JB@' c_bin 'Write Document'(c39).
+    WHEN 'OTF'.
+      set_type '@OA@' c_bin 'OTF Document'(c40).
+    WHEN 'VSD'.
+      set_type '@JE@' c_bin 'MS Visio Document'(c41).
+    WHEN 'BMP'.
+      set_type '@IU@' c_bin 'Bitmap Image'(c42).
+    WHEN 'PNG'.
+      set_type '@IU@' c_bin 'PNG Image'(c43).
+    WHEN 'XLS' OR 'XLSX'.
+      set_type '@J2@' c_bin 'MS Excel Worksheet'(c44).
+    WHEN 'CSV'.
+      set_type '@J2@' c_asc 'MS Excel CSV'(c45).
+    WHEN 'JPG' OR 'JPEG'.
+      set_type '@J0@' c_bin 'JPEG Image'(c46).
+    WHEN 'ZIP' OR 'RAR' OR 'TAR' OR 'GZ' OR 'BZ2'.
+      set_type '@12@' c_bin 'Compressed Folder'(c47).
+    WHEN 'AVI' OR 'DIVX' OR 'MKV'.
+      set_type '@5L@' c_bin 'Video Clip'(c48).
+    WHEN 'WAV'.
+      set_type '@5L@' c_bin 'Wave Sound'(c49).
+    WHEN 'SND'.
+      set_type '@5L@' c_bin 'AU Format Sound'(c50).
+    WHEN 'MP3'.
+      set_type '@5L@' c_bin 'MP3 Format Sound'(c51).
+    WHEN 'JAR'.
+      set_type '@N5@' c_bin 'Executable Jar File'(c52).
+    WHEN 'BAK'.
+      set_type '@9V@' c_asc 'BAK File'(c53).
+    WHEN OTHERS.
+      set_type_gen '@O9@'.
+  ENDCASE.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_DETAIL1_ALV
+*&---------------------------------------------------------------------*
+*       Fill t_fieldcat_grid1, t_sort_grid1, s_layout_grid1
+*----------------------------------------------------------------------*
+FORM init_detail1_alv.
+  DATA: ls_fieldcat TYPE lvc_s_fcat,
+        ls_sort     TYPE lvc_s_sort.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'PATH'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '50'.
+  ls_fieldcat-lowercase     = abap_true.
+  ls_fieldcat-no_out        = abap_true.
+  ls_fieldcat-coltext       = 'Path'(h01).
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'NAME'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '40'.
+  ls_fieldcat-lowercase     = abap_true.
+  ls_fieldcat-coltext       = 'FileName'(h02).
+  ls_fieldcat-col_pos       = 2.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'DIR'.
+  ls_fieldcat-datatype      = 'INT4'.
+  ls_fieldcat-no_out        = abap_true.
+  ls_fieldcat-tech          = abap_true.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'ICON'.
+  ls_fieldcat-seltext       = 'Icon'(h03).
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '2'.
+  ls_fieldcat-icon          = abap_true.
+  ls_fieldcat-col_pos       = 1.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'FILETYPE'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '16'.
+  ls_fieldcat-lowercase     = abap_true.
+  ls_fieldcat-coltext       = 'FileType'(h04).
+  ls_fieldcat-col_pos       = 3.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'LEN'.
+  ls_fieldcat-datatype      = 'INT4'.
+  ls_fieldcat-outputlen     = '12'.
+  ls_fieldcat-no_zero       = abap_true.
+  ls_fieldcat-just          = 'R'.
+  ls_fieldcat-coltext       = 'Size'(h05).
+  ls_fieldcat-col_pos       = 4.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'CDATE'.
+  ls_fieldcat-datatype      = 'DATS'.
+  ls_fieldcat-coltext       = 'Creation Date'(h06).
+  ls_fieldcat-col_pos       = 5.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'CTIME'.
+  ls_fieldcat-datatype      = 'TIMS'.
+  ls_fieldcat-coltext       = 'Creation Time'(h07).
+  ls_fieldcat-col_pos       = 6.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'MDATE'.
+  ls_fieldcat-datatype      = 'DATS'.
+  ls_fieldcat-coltext       = 'Modification Date'(h08).
+  ls_fieldcat-col_pos       = 7.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'MTIME'.
+  ls_fieldcat-datatype      = 'TIMS'.
+  ls_fieldcat-coltext       = 'Modification Time'(h09).
+  ls_fieldcat-col_pos       = 8.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'RDATE'.
+  ls_fieldcat-datatype      = 'DATS'.
+  ls_fieldcat-coltext       = 'Access Date'(h10).
+  ls_fieldcat-col_pos       = 9.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'RTIME'.
+  ls_fieldcat-datatype      = 'TIMS'.
+  ls_fieldcat-coltext       = 'Access Time'(h11).
+  ls_fieldcat-col_pos       = 10.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'ATTRS'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-coltext       = 'Attributes'(h21).
+  ls_fieldcat-col_pos       = 11.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'FILETRANSFERMODE'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-no_out        = abap_true.
+  ls_fieldcat-tech          = abap_true.
+  APPEND ls_fieldcat TO t_fieldcat_grid1.
+
+* Default sorting by name (but directory in first)
+  CLEAR ls_sort.
+  ls_sort-fieldname  = 'DIR'.
+  ls_sort-spos       = 1.
+  ls_sort-down       = abap_true.
+  ls_sort-obligatory = abap_true.
+  APPEND ls_sort TO t_sort_grid1.
+
+  CLEAR ls_sort.
+  ls_sort-fieldname = 'NAME'.
+  ls_sort-spos      = 2.
+  ls_sort-up        = abap_true.
+  APPEND ls_sort TO t_sort_grid1.
+
+* Default layout
+  CLEAR s_layout_grid1.
+  s_layout_grid1-no_totline = abap_true.
+  s_layout_grid1-no_totarr  = abap_true.
+  s_layout_grid1-no_totexp  = abap_true.
+  s_layout_grid1-zebra      = abap_true.
+  s_layout_grid1-no_toolbar = abap_true.
+  s_layout_grid1-sgl_clk_hd = abap_true.
+  s_layout_grid1-no_merging = abap_true.
+  s_layout_grid1-no_hgridln = abap_true.
+  s_layout_grid1-s_dragdrop-row_ddid = w_handle_grid1.
+  s_layout_grid1-s_dragdrop-cntr_ddid = w_handle_grid1.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  REFRESH_GRID_DISPLAY
+*&---------------------------------------------------------------------*
+*       Refresh grid display
+*----------------------------------------------------------------------*
+FORM refresh_grid_display USING pw_gridnumber TYPE i.
+  IF pw_gridnumber = 1.
+    CALL METHOD o_grid1->refresh_table_display.
+  ELSE.
+    CALL METHOD o_grid2->refresh_table_display.
+    PERFORM overwrite_total_text.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  overwrite_total_text
+*&---------------------------------------------------------------------*
+*       Count number of files in remote dir and display in total line
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  overwrite_total_text
+*&---------------------------------------------------------------------*
+*       Count number of files in remote dir and display in total line
+*----------------------------------------------------------------------*
+FORM overwrite_total_text.
+  DATA : lo_total   TYPE REF TO data,
+         ls_detail2 LIKE s_detail2,
+         lw_count   TYPE i.
+  FIELD-SYMBOLS : <lt_total>      TYPE STANDARD TABLE,
+                  <ls_total_line> LIKE s_detail2.
+
+  CALL METHOD o_grid2->get_subtotals
+    IMPORTING
+      ep_collect00 = lo_total.
+  ASSIGN lo_total->* TO <lt_total>.
+  IF sy-subrc = 0.
+    READ TABLE <lt_total> ASSIGNING <ls_total_line> INDEX 1.
+    IF sy-subrc = 0.
+      LOOP AT t_details2 INTO ls_detail2 WHERE dir = 0.
+        lw_count = lw_count + 1.
+      ENDLOOP.
+      <ls_total_line>-name = lw_count.
+      CONDENSE <ls_total_line>-name.
+      CONCATENATE <ls_total_line>-name 'files'(m31)
+                  INTO <ls_total_line>-name SEPARATED BY space.
+      CALL METHOD o_grid2->refresh_table_display
+        EXPORTING
+          i_soft_refresh = 'X'.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SUB_NODES1
+*&---------------------------------------------------------------------*
+*       Get all subfolders of a given local PC node
+*----------------------------------------------------------------------*
+FORM get_sub_nodes1 USING pw_node LIKE s_node
+                          pw_nodeindex TYPE i.
+  DATA: lt_files       TYPE STANDARD TABLE OF file_info,
+        ls_file        TYPE file_info,
+        lt_nodes_new   LIKE TABLE OF s_node,
+        lw_parent_node LIKE s_node,
+        lw_fileupper   LIKE ls_file-filename.
+
+  DATA: lw_count     TYPE i,
+        lw_path_name TYPE string.
+
+  IF pw_node-read NE space.
+    RETURN.
+  ENDIF.
+
+  lw_parent_node = pw_node.
+  lw_path_name = pw_node-path.
+  REFRESH :  t_details1, lt_files.
+
+  CALL METHOD cl_gui_frontend_services=>directory_list_files
+    EXPORTING
+      directory                   = lw_path_name
+      directories_only            = abap_true
+    CHANGING
+      file_table                  = lt_files
+      count                       = lw_count
+    EXCEPTIONS
+      cntl_error                  = 1
+      directory_list_files_failed = 2
+      wrong_parameter             = 3
+      error_no_gui                = 4
+      not_supported_by_gui        = 5
+      OTHERS                      = 6.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+  pw_node-read = abap_true.
+  MODIFY t_nodes1 FROM pw_node INDEX pw_nodeindex TRANSPORTING read.
+
+  SORT lt_files BY filename.
+
+  LOOP AT lt_files INTO ls_file.
+    CLEAR s_node.
+    w_node1_count = w_node1_count + 1.
+    s_node-node_key = w_node1_count.
+    s_node-relatkey = lw_parent_node-node_key.
+    s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+    s_node-isfolder = abap_true.
+    s_node-text = ls_file-filename.
+    CONCATENATE lw_parent_node-path ls_file-filename c_local_slash
+                INTO s_node-path.
+    s_node-texttosort = s_node-text.
+    TRANSLATE s_node-texttosort TO LOWER CASE.
+    lw_fileupper = ls_file-filename.
+    TRANSLATE lw_fileupper TO UPPER CASE.
+    IF lw_fileupper = '$RECYCLE.BIN'.
+      s_node-n_image = s_node-exp_image = '@11@'.
+    ENDIF.
+    s_node-dragdropid = w_handle_tree1.
+    APPEND s_node TO lt_nodes_new.
+  ENDLOOP.
+  SORT lt_nodes_new BY texttosort.
+  APPEND LINES OF lt_nodes_new TO t_nodes1.
+
+  IF NOT lt_nodes_new IS INITIAL.
+    CALL METHOD o_tree1->add_nodes
+      EXPORTING
+        table_structure_name = 'MTREESNODE'
+        node_table           = lt_nodes_new
+      EXCEPTIONS
+        OTHERS               = 3.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    CALL METHOD o_tree1->expand_node
+      EXPORTING
+        node_key = lw_parent_node-node_key.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CHANGE_LOCAL_FOLDER
+*&---------------------------------------------------------------------*
+*       Read Folder of the node and display content
+*----------------------------------------------------------------------*
+FORM change_local_folder USING pw_node_key TYPE tv_nodekey.
+  DATA lw_index TYPE i.
+  DATA ls_node LIKE s_node.
+
+  IF pw_node_key = 'ROOT'.
+    RETURN.
+  ENDIF.
+
+  READ TABLE t_nodes1 INTO s_node WITH KEY node_key = pw_node_key.
+  IF sy-subrc NE 0.
+    RETURN.
+  ENDIF.
+  lw_index = sy-tabix.
+  ls_node = s_node.
+  PERFORM get_sub_nodes1 USING ls_node lw_index.
+  PERFORM get_local_folder_detail USING ls_node-path.
+  PERFORM refresh_grid_display USING 1.
+
+  w_path = ls_node-path.
+  EXPORT w_path TO SHARED BUFFER indx(st) ID w_shared_dir_local.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_TREE2
+*&---------------------------------------------------------------------*
+*       Initialize remote tree
+*----------------------------------------------------------------------*
+FORM init_tree2.
+  DATA: lt_event  TYPE cntl_simple_events,
+        ls_event  TYPE cntl_simple_event,
+        lw_effect TYPE i.
+
+  CREATE OBJECT o_tree2
+    EXPORTING
+      parent              = o_container_tree2
+      node_selection_mode = cl_gui_simple_tree=>node_sel_mode_single
+    EXCEPTIONS
+      lifetime_error      = 1
+      cntl_system_error   = 2
+      create_error        = 3
+      failed              = 4
+      OTHERS              = 5.
+  IF sy-subrc <> 0.
+    MESSAGE a000(tree_control_msg).
+  ENDIF.
+
+  ls_event-eventid = cl_gui_simple_tree=>eventid_selection_changed.
+  ls_event-appl_event = abap_true.
+  APPEND ls_event TO lt_event.
+
+  CALL METHOD o_tree2->set_registered_events
+    EXPORTING
+      events                    = lt_event
+    EXCEPTIONS
+      cntl_error                = 1
+      cntl_system_error         = 2
+      illegal_event_combination = 3.
+  IF sy-subrc <> 0.
+    MESSAGE a000(tree_control_msg).
+  ENDIF.
+
+  SET HANDLER o_handle_event->handle_select_remote FOR o_tree2.
+  SET HANDLER o_handle_event->handle_remote_tree_drop FOR o_tree2.
+
+  lw_effect = cl_dragdrop=>move + cl_dragdrop=>copy.
+  CREATE OBJECT o_dragdrop_tree2.
+  CALL METHOD o_dragdrop_tree2->add
+    EXPORTING
+      flavor     = 'LINE'
+      dragsrc    = space
+      droptarget = abap_true
+      effect     = lw_effect.
+  CALL METHOD o_dragdrop_tree2->get_handle
+    IMPORTING
+      handle = w_handle_tree2.
+
+  CLEAR w_node2_count.
+  PERFORM init_remote_dir.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_REMOTE_DIR
+*&---------------------------------------------------------------------*
+*       Initialize remote tree content and get server shortcuts
+*----------------------------------------------------------------------*
+FORM init_remote_dir.
+  DATA : lt_drives_remote LIKE t_drives,
+         ls_drives_remote LIKE LINE OF lt_drives_remote.
+
+  REFRESH t_nodes2.
+
+  CLEAR s_node.
+  s_node-node_key = 'ROOT'.
+  s_node-isfolder = abap_true.
+  s_node-expander = abap_true.
+  s_node-text = s_customize-root_name.
+  s_node-path = s_customize-root_path.
+  IF s_customize-root_path = o_server_command->slash.
+    s_node-notreadable = o_server_command->root_not_readable.
+  ENDIF.
+  IF s_node-notreadable = space.
+    s_node-dragdropid = w_handle_tree2.
+  ENDIF.
+  s_node-n_image = s_node-exp_image = '@6K@'.
+  APPEND s_node TO t_nodes2.
+
+  IF s_customize-root_path = o_server_command->slash.
+    CALL METHOD o_server_command->drive_list
+      IMPORTING
+        e_drive_table = lt_drives_remote.
+
+    LOOP AT lt_drives_remote INTO ls_drives_remote.
+      CLEAR s_node.
+      s_node-node_key = ls_drives_remote-drive(1).
+      s_node-relatkey = 'ROOT'.
+      s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+      s_node-isfolder = abap_true.
+      s_node-text = ls_drives_remote-desc.
+      CASE ls_drives_remote-type.
+        WHEN c_drivetypewin_hdd.
+          s_node-n_image = s_node-exp_image = '@4V@'.
+        WHEN c_drivetypewin_cd.
+          s_node-n_image = s_node-exp_image = '@4W@'.
+        WHEN c_drivetypewin_remote.
+          s_node-n_image = s_node-exp_image = '@53@'.
+        WHEN c_drivetypewin_usb.
+          s_node-n_image = s_node-exp_image = '@63@'.
+        WHEN OTHERS.
+      ENDCASE.
+      CONCATENATE ls_drives_remote-drive(1) ':\' INTO s_node-path.
+      s_node-dragdropid = w_handle_tree2.
+      APPEND s_node TO t_nodes2.
+    ENDLOOP.
+  ENDIF.
+
+  IF s_customize-logical_path = abap_true.
+    PERFORM add_remote_logical_folders.
+  ENDIF.
+
+  CALL METHOD o_tree2->add_nodes
+    EXPORTING
+      table_structure_name           = 'MTREESNODE'
+      node_table                     = t_nodes2
+    EXCEPTIONS
+      failed                         = 1
+      error_in_node_table            = 2
+      dp_error                       = 3
+      table_structure_name_not_found = 4
+      OTHERS                         = 5.
+  IF sy-subrc <> 0.
+    MESSAGE a000(tree_control_msg).
+  ENDIF.
+
+  PERFORM get_shortcuts.
+  CALL METHOD o_tree2->expand_root_nodes.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CHANGE_REMOTE_FOLDER
+*&---------------------------------------------------------------------*
+*       Read Folder of the node and display content
+*----------------------------------------------------------------------*
+FORM change_remote_folder USING pw_node_key TYPE tv_nodekey.
+  DATA : lw_index TYPE i,
+         ls_node  LIKE s_node,
+         lw_path  LIKE s_node-path.
+
+  READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = pw_node_key.
+  IF sy-subrc NE 0 OR ls_node-notreadable NE space.
+    RETURN.
+  ENDIF.
+
+  IF ls_node-relatkey = 'SHORTCUT'.
+    lw_path = ls_node-path+1.
+    PERFORM goto_shortcut USING lw_path 2 space.
+    RETURN.
+  ENDIF.
+
+  lw_index = sy-tabix.
+  PERFORM get_sub_nodes2 USING ls_node lw_index.
+  PERFORM get_remote_folder_detail USING ls_node-path.
+  PERFORM refresh_grid_display USING 2.
+
+  w_path = ls_node-path.
+  EXPORT w_path TO SHARED BUFFER indx(st) ID w_shared_dir_remote.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SUB_NODES2
+*&---------------------------------------------------------------------*
+*       Get all subfolders of a given node
+*----------------------------------------------------------------------*
+FORM get_sub_nodes2 USING pw_node LIKE s_node
+                          pw_nodeindex TYPE i.
+  DATA: ls_parent_node LIKE s_node,
+        lt_nodes_new   LIKE TABLE OF s_node.
+  DATA: BEGIN OF ls_file,
+          dirname(75) TYPE c,
+          name(75)    TYPE c,
+          type(10)    TYPE c,
+          len(8)      TYPE p,
+          owner(8)    TYPE c,
+          mtime(6)    TYPE p,
+          mode(9)     TYPE c,
+          useable(1)  TYPE c,
+          subrc(4)    TYPE c,
+          errno(3)    TYPE c,
+          errmsg(40)  TYPE c,
+          mod_date    TYPE d,
+          mod_time(8) TYPE c,
+          seen(1)     TYPE c,
+          changed(1)  TYPE c,
+        END OF ls_file,
+        lw_fileupper LIKE ls_file-name.
+
+  IF pw_node-read NE space OR pw_node-notreadable NE space.
+    RETURN.
+  ENDIF.
+
+  ls_parent_node = pw_node.
+  pw_node-read = abap_true.
+  MODIFY t_nodes2 FROM pw_node INDEX pw_nodeindex TRANSPORTING read.
+
+  CALL 'C_DIR_READ_START' ID 'DIR'    FIELD ls_parent_node-path
+                          ID 'FILE'   FIELD '*'
+                          ID 'ERRNO'  FIELD ls_file-errno
+                          ID 'ERRMSG' FIELD ls_file-errmsg.
+
+  IF sy-subrc NE 0 OR ls_file-errmsg NE space.
+    CALL 'C_DIR_READ_NEXT'.
+    CALL 'C_DIR_READ_FINISH'.
+    CALL 'C_DIR_READ_START' ID 'DIR'    FIELD ls_parent_node-path
+                            ID 'FILE'   FIELD '*'
+                            ID 'ERRNO'  FIELD ls_file-errno
+                            ID 'ERRMSG' FIELD ls_file-errmsg.
+  ENDIF.
+
+  IF sy-subrc <> 0 OR ls_file-errmsg NE space.
+    MESSAGE s204(s1) WITH sy-subrc 'C_DIR_READ_START'
+                          ls_file-errno ls_file-errmsg.
+    RETURN.
+  ENDIF.
+
+  DO.
+    CLEAR ls_file.
+    CALL 'C_DIR_READ_NEXT'
+      ID 'TYPE'   FIELD ls_file-type
+      ID 'NAME'   FIELD ls_file-name
+      ID 'LEN'    FIELD ls_file-len
+      ID 'OWNER'  FIELD ls_file-owner
+      ID 'MTIME'  FIELD ls_file-mtime
+      ID 'MODE'   FIELD ls_file-mode
+      ID 'ERRNO'  FIELD ls_file-errno
+      ID 'ERRMSG' FIELD ls_file-errmsg.
+    IF sy-subrc <> 0 AND ls_file-name IS INITIAL.
+      EXIT.
+    ENDIF.
+    IF sy-subrc = 5.
+      sy-subrc = 0.
+    ENDIF.
+    CHECK NOT ls_file-name IS INITIAL.
+    CHECK ls_file-type(4) NE 'file'.
+    CHECK ls_file-name NE '.' AND ls_file-name NE c_goto_parent_dir.
+
+    CLEAR s_node.
+    w_node2_count = w_node2_count + 1.
+    s_node-node_key = w_node2_count.
+    s_node-relatkey = ls_parent_node-node_key.
+    s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+    s_node-isfolder = abap_true.
+    s_node-text = ls_file-name.
+    CONCATENATE ls_parent_node-path ls_file-name o_server_command->slash
+                INTO s_node-path.
+    s_node-texttosort = s_node-text.
+    TRANSLATE s_node-texttosort TO LOWER CASE.
+    lw_fileupper = ls_file-name.
+    TRANSLATE lw_fileupper TO UPPER CASE.
+    IF lw_fileupper = '$RECYCLE.BIN'.
+      s_node-n_image = s_node-exp_image = '@11@'.
+    ENDIF.
+    s_node-dragdropid = w_handle_tree2.
+    APPEND s_node TO lt_nodes_new.
+  ENDDO.
+  CALL 'C_DIR_READ_FINISH'
+      ID 'ERRNO'  FIELD ls_file-errno
+      ID 'ERRMSG' FIELD ls_file-errmsg.
+
+  IF NOT lt_nodes_new IS INITIAL.
+    SORT lt_nodes_new BY texttosort.
+    APPEND LINES OF lt_nodes_new TO t_nodes2.
+
+    CALL METHOD o_tree2->add_nodes
+      EXPORTING
+        table_structure_name = 'MTREESNODE'
+        node_table           = lt_nodes_new
+      EXCEPTIONS
+        OTHERS               = 3.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    CALL METHOD o_tree2->expand_node
+      EXPORTING
+        node_key = ls_parent_node-node_key.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_REMOTE_FOLDER_DETAIL
+*&---------------------------------------------------------------------*
+*       Get list of files for a given remote path
+*----------------------------------------------------------------------*
+FORM get_remote_folder_detail USING pw_path TYPE c.
+  DATA: BEGIN OF ls_file,
+          dirname(75) TYPE c,
+          name(75)    TYPE c,
+          type(10)    TYPE c,
+          len(8)      TYPE p,
+          owner(8)    TYPE c,
+          mtime(6)    TYPE p,
+          mode(9)     TYPE c,
+          useable(1)  TYPE c,
+          subrc(4)    TYPE c,
+          errno(3)    TYPE c,
+          errmsg(40)  TYPE c,
+          mod_date    TYPE d,
+          mod_time(8) TYPE c,
+          seen(1)     TYPE c,
+          changed(1)  TYPE c,
+        END OF ls_file,
+        lw_fileupper LIKE ls_file-name,
+        lw_path      LIKE s_detail2-path,
+        lw_name      TYPE string,
+        lw_attrib    TYPE string.
+
+  REFRESH t_details2.
+  lw_path = pw_path.
+
+  CALL 'C_DIR_READ_START' ID 'DIR'    FIELD lw_path
+                          ID 'FILE'   FIELD '*'
+                          ID 'ERRNO'  FIELD ls_file-errno
+                          ID 'ERRMSG' FIELD ls_file-errmsg.
+
+  IF sy-subrc NE 0.
+    CALL 'C_DIR_READ_NEXT'.
+    CALL 'C_DIR_READ_FINISH'.
+    CALL 'C_DIR_READ_START' ID 'DIR'    FIELD lw_path
+                            ID 'FILE'   FIELD '*'
+                            ID 'ERRNO'  FIELD ls_file-errno
+                            ID 'ERRMSG' FIELD ls_file-errmsg.
+  ENDIF.
+
+  IF sy-subrc NE 0.
+    MESSAGE ls_file-errmsg TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  DO.
+    CLEAR ls_file.
+    CALL 'C_DIR_READ_NEXT'
+      ID 'TYPE'   FIELD ls_file-type
+      ID 'NAME'   FIELD ls_file-name
+      ID 'LEN'    FIELD ls_file-len
+      ID 'OWNER'  FIELD ls_file-owner
+      ID 'MTIME'  FIELD ls_file-mtime
+      ID 'MODE'   FIELD ls_file-mode
+      ID 'ERRNO'  FIELD ls_file-errno
+      ID 'ERRMSG' FIELD ls_file-errmsg.
+    IF sy-subrc <> 0 AND ls_file-name IS INITIAL.
+      EXIT.
+    ENDIF.
+    IF sy-subrc = 5.
+      sy-subrc = 0.
+    ENDIF.
+    CHECK NOT ls_file-name IS INITIAL.
+    CHECK ls_file-name NE '. '.
+    IF lw_path = s_customize-root_path.
+      CHECK ls_file-name NE c_goto_parent_dir.
+    ENDIF.
+
+    CLEAR:  s_detail2.
+    s_detail2-path = lw_path.
+    s_detail2-name = ls_file-name.
+    IF ls_file-type(4) = 'file'.
+      s_detail2-dir = 0.
+      PERFORM get_filetype USING s_detail2-name
+                           CHANGING s_detail2-icon
+                                    s_detail2-filetype
+                                    s_detail2-filetransfermode.
+      s_detail2-len = ls_file-len.
+    ELSE.
+      s_detail2-dir = 1.
+      lw_fileupper = ls_file-name.
+      TRANSLATE lw_fileupper TO UPPER CASE.
+      IF lw_fileupper = '$RECYCLE.BIN'.
+        s_detail2-icon = '@11@'.
+        s_detail2-filetype = 'Trash bin'(c55).
+      ELSE.
+        s_detail2-icon = '@IH@'.
+        s_detail2-filetype = 'Directory'(c07).
+      ENDIF.
+    ENDIF.
+
+    PERFORM timestamp_convert USING ls_file-mtime
+                                    s_detail2-mdate
+                                    s_detail2-mtime.
+    s_detail2-mode = ls_file-mode.
+    CONCATENATE s_detail2-path s_detail2-name INTO lw_name.
+    lw_name = o_server_command->file_protect( lw_name ).
+    CALL METHOD o_server_command->get_attrib
+      EXPORTING
+        i_file   = lw_name
+      IMPORTING
+        e_attrib = lw_attrib.
+
+    IF s_customize-autodirsize = abap_true AND s_detail2-dir = 1
+    AND s_detail2-name NE '..' AND s_auth-dirsize NE space.
+      s_detail2-len = o_server_command->get_folder_size( lw_name ).
+    ENDIF.
+
+    s_detail2-attrs = lw_attrib.
+    s_detail2-owner = ls_file-owner.
+    APPEND s_detail2 TO t_details2.
+  ENDDO.
+  CALL 'C_DIR_READ_FINISH'
+      ID 'ERRNO'  FIELD ls_file-errno
+      ID 'ERRMSG' FIELD ls_file-errmsg.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_DETAIL2
+*&---------------------------------------------------------------------*
+*       Initialize remote grid object
+*----------------------------------------------------------------------*
+FORM init_detail2.
+  DATA: lw_effect TYPE i.
+
+  CREATE OBJECT o_grid2
+    EXPORTING
+      i_parent = o_container_detail2.
+
+  SET HANDLER o_handle_event->handle_grid_double_click_remot FOR o_grid2.
+  SET HANDLER o_handle_event->handle_grid_context FOR o_grid2.
+  SET HANDLER o_handle_event->handle_user_command FOR o_grid2.
+  SET HANDLER o_handle_event->handle_toolbar FOR o_grid2.
+  SET HANDLER o_handle_event->handle_menu_button FOR o_grid2.
+  SET HANDLER o_handle_event->handle_grid_drag FOR o_grid2.
+  SET HANDLER o_handle_event->handle_remote_grid_drop FOR o_grid2.
+
+  lw_effect = cl_dragdrop=>move + cl_dragdrop=>copy.
+  CREATE OBJECT o_dragdrop_grid2.
+  CALL METHOD o_dragdrop_grid2->add
+    EXPORTING
+      flavor     = 'LINE'
+      dragsrc    = abap_true
+      droptarget = abap_true
+      effect     = lw_effect.
+  CALL METHOD o_dragdrop_grid2->get_handle
+    IMPORTING
+      handle = w_handle_grid2.
+
+  PERFORM init_detail2_alv.
+
+  CALL METHOD o_grid2->set_table_for_first_display
+    EXPORTING
+      is_layout       = s_layout_grid2
+    CHANGING
+      it_outtab       = t_details2
+      it_fieldcatalog = t_fieldcat_grid2[]
+      it_sort         = t_sort_grid2[].
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_DETAIL2_ALV
+*&---------------------------------------------------------------------*
+*       Fill t_fieldcat_grid2, t_sort_grid2, s_layout_grid2
+*----------------------------------------------------------------------*
+FORM init_detail2_alv.
+  DATA: ls_fieldcat TYPE lvc_s_fcat,
+        ls_sort     TYPE lvc_s_sort.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'PATH'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '50'.
+  ls_fieldcat-lowercase     = abap_true.
+  ls_fieldcat-no_out        = abap_true.
+  ls_fieldcat-coltext       = 'Path'(h01).
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'NAME'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '40'.
+  ls_fieldcat-lowercase     = abap_true.
+  ls_fieldcat-coltext       = 'FileName'(h02).
+  ls_fieldcat-col_pos       = 2.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'DIR'.
+  ls_fieldcat-datatype      = 'INT4'.
+  ls_fieldcat-no_out        = abap_true.
+  ls_fieldcat-tech          = abap_true.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'ICON'.
+  ls_fieldcat-seltext       = 'Icon'(h03).
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '2'.
+  ls_fieldcat-icon          = abap_true.
+  ls_fieldcat-col_pos       = 1.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'FILETYPE'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '16'.
+  ls_fieldcat-lowercase     = abap_true.
+  ls_fieldcat-coltext       = 'FileType'(h04).
+  ls_fieldcat-col_pos       = 3.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'LEN'.
+  ls_fieldcat-datatype      = 'INT4'.
+  ls_fieldcat-outputlen     = '12'.
+  ls_fieldcat-no_zero       = abap_true.
+  ls_fieldcat-just          = 'R'.
+  ls_fieldcat-coltext       = 'Size'(h05).
+  ls_fieldcat-do_sum        = abap_true.
+  ls_fieldcat-col_pos       = 4.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'MDATE'.
+  ls_fieldcat-datatype      = 'DATS'.
+  ls_fieldcat-coltext       = 'Modification Date'(h08).
+  ls_fieldcat-col_pos       = 5.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'MTIME'.
+  ls_fieldcat-datatype      = 'TIMS'.
+  ls_fieldcat-coltext       = 'Modification Time'(h09).
+  ls_fieldcat-col_pos       = 6.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  IF o_server_command->attrib_mode = lif_server_command=>c_attrmode_chmod.
+    CLEAR ls_fieldcat.
+    ls_fieldcat-fieldname     = 'MODE'.
+    ls_fieldcat-datatype      = 'CHAR'.
+    ls_fieldcat-outputlen     = '5'.
+    ls_fieldcat-coltext       = 'Mode'(h12).
+    ls_fieldcat-col_pos       = 7.
+    APPEND ls_fieldcat TO t_fieldcat_grid2.
+  ELSEIF o_server_command->attrib_mode = lif_server_command=>c_attrmode_attrib.
+    CLEAR ls_fieldcat.
+    ls_fieldcat-fieldname     = 'ATTRS'.
+    ls_fieldcat-datatype      = 'CHAR'.
+    ls_fieldcat-outputlen     = '10'.
+    ls_fieldcat-coltext       = 'Attributes'(h21).
+    ls_fieldcat-col_pos       = 7.
+    APPEND ls_fieldcat TO t_fieldcat_grid2.
+  ENDIF.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'OWNER'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-outputlen     = '20'.
+  ls_fieldcat-coltext       = 'Owner'(h18).
+  ls_fieldcat-col_pos       = 8.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname     = 'FILETRANSFERMODE'.
+  ls_fieldcat-datatype      = 'CHAR'.
+  ls_fieldcat-no_out        = abap_true.
+  ls_fieldcat-tech          = abap_true.
+  APPEND ls_fieldcat TO t_fieldcat_grid2.
+
+  CLEAR ls_sort.
+  ls_sort-fieldname  = 'DIR'.
+  ls_sort-spos       = 1.
+  ls_sort-down       = abap_true.
+  ls_sort-obligatory = abap_true.
+  APPEND ls_sort TO t_sort_grid2.
+
+  CLEAR ls_sort.
+  ls_sort-fieldname = 'NAME'.
+  ls_sort-spos      = 2.
+  ls_sort-up        = abap_true.
+  APPEND ls_sort TO t_sort_grid2.
+
+  CLEAR s_layout_grid2.
+  s_layout_grid2-no_totline = space.
+  s_layout_grid2-no_totarr  = abap_true.
+  s_layout_grid2-no_totexp  = abap_true.
+  s_layout_grid2-zebra      = abap_true.
+  s_layout_grid2-sgl_clk_hd = abap_true.
+  s_layout_grid2-no_merging = abap_true.
+  s_layout_grid2-no_hgridln = abap_true.
+  s_layout_grid2-s_dragdrop-row_ddid = w_handle_grid2.
+  s_layout_grid2-s_dragdrop-cntr_ddid = w_handle_grid2.
+  s_layout_grid2-totals_bef = s_customize-total_on_top.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  SAVE_REMOTE_TO_LOCAL
+*&---------------------------------------------------------------------*
+*       Download remote file to local PC
+*----------------------------------------------------------------------*
+FORM save_remote_to_local USING pw_remote_path TYPE c
+                                pw_remote_name TYPE c
+                                pw_local_path TYPE c
+                                pw_local_name TYPE c
+                                pw_transfermode TYPE c
+                                pw_open TYPE c.
+  DATA :  lw_localdir TYPE string.
+  DATA : lw_local_path(1000) TYPE c,
+         lw_file(1000)       TYPE c,
+         ls_file             TYPE string,
+         lt_file             LIKE TABLE OF ls_file,
+         ls_file_bin(1000)   TYPE x,
+         lt_file_bin         LIKE TABLE OF ls_file_bin,
+         lw_filetype(10)     TYPE c,
+         lw_string           TYPE string,
+         lw_string2          TYPE string,
+         lw_action(1)        TYPE c,
+         lw_len              TYPE i,
+         lw_filelength       TYPE i,
+         lw_replace          TYPE string,
+         lw_return           TYPE abap_bool.
+  FIELD-SYMBOLS: <lt_file> TYPE STANDARD TABLE,
+                 <ls_file> TYPE any.
+
+  IF s_auth-download NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF pw_local_path IS INITIAL.
+    CALL METHOD cl_gui_frontend_services=>get_temp_directory
+      CHANGING
+        temp_dir             = lw_localdir
+      EXCEPTIONS
+        cntl_error           = 1
+        error_no_gui         = 2
+        not_supported_by_gui = 3
+        OTHERS               = 4.
+    IF sy-subrc <> 0.
+      MESSAGE 'Cannot read tmp directory'(e07) TYPE c_msg_success
+              DISPLAY LIKE c_msg_error.
+      RETURN.
+    ENDIF.
+    CALL METHOD cl_gui_cfw=>flush.
+  ELSE.
+    lw_localdir = pw_local_path.
+  ENDIF.
+  IF lw_localdir IS INITIAL.
+    MESSAGE 'Cannot read tmp directory'(e07) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_local_path = lw_localdir.
+  lw_len = strlen( lw_local_path ).
+  lw_len = lw_len - 1.
+  IF lw_local_path+lw_len(1) NE c_local_slash.
+    CONCATENATE lw_localdir c_local_slash INTO lw_localdir.
+  ENDIF.
+
+  IF w_force_transfer_mode IS INITIAL.
+    lw_filetype = pw_transfermode.
+  ELSE.
+    lw_filetype = w_force_transfer_mode.
+  ENDIF.
+
+  CONCATENATE pw_remote_path pw_remote_name INTO lw_file.
+
+  IF pw_open = c_open_no.
+    CONCATENATE lw_localdir pw_local_name INTO ls_file.
+    CALL METHOD cl_gui_frontend_services=>file_exist
+      EXPORTING
+        file   = ls_file
+      RECEIVING
+        result = lw_return
+      EXCEPTIONS
+        OTHERS = 5.
+    IF sy-subrc = 0 AND lw_return = abap_true.
+      lw_string = 'File # already exists in #.  Overwrite ? '(t22).
+      lw_string2 = 'Overwrite'(t23).
+    ELSE.
+      lw_string = 'Download # to # ? '(t14).
+      lw_string2 = 'Download'(t24).
+    ENDIF.
+    IF s_customize-confirm_dl = abap_true
+    OR lw_string2 = 'Overwrite'(t23).
+      lw_replace = lw_file.
+      lw_replace = o_server_command->file_protect( lw_replace ).
+      REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string
+              WITH lw_replace.
+      lw_replace = o_server_command->file_protect( lw_localdir ).
+      REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string
+              WITH lw_replace.
+      PERFORM confirm_action USING lw_string lw_string2
+                             CHANGING lw_action.
+      IF lw_action = space.
+        RETURN.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  CONCATENATE lw_localdir pw_local_name INTO lw_localdir.
+
+  IF lw_filetype = c_bin.
+    ASSIGN lt_file_bin TO <lt_file>.
+    ASSIGN ls_file_bin TO <ls_file>.
+    IF NOT <lt_file> IS ASSIGNED
+    OR NOT <ls_file> IS ASSIGNED.
+      RETURN.
+    ENDIF.
+    OPEN DATASET lw_file FOR INPUT IN BINARY MODE.
+  ELSE.
+    ASSIGN lt_file TO <lt_file>.
+    ASSIGN ls_file TO <ls_file>.
+    IF NOT <lt_file> IS ASSIGNED
+    OR NOT <ls_file> IS ASSIGNED.
+      RETURN.
+    ENDIF.
+    OPEN DATASET lw_file FOR INPUT IN TEXT MODE ENCODING NON-UNICODE.
+  ENDIF.
+  IF sy-subrc <> 0.
+    MESSAGE 'Cannot read remote file'(e09) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+    RETURN.
+  ELSE.
+    CLEAR lw_filelength.
+    DO.
+      READ DATASET lw_file INTO <ls_file> LENGTH lw_len.
+      IF sy-subrc = 0.
+        APPEND <ls_file> TO <lt_file>.
+        lw_filelength = lw_filelength + lw_len.
+      ELSEIF sy-subrc = 4.
+        IF NOT <ls_file> IS INITIAL.
+          APPEND <ls_file> TO <lt_file>.
+          lw_filelength = lw_filelength + lw_len.
+        ENDIF.
+        EXIT.
+      ENDIF.
+    ENDDO.
+    CLOSE DATASET lw_file.
+  ENDIF.
+
+  IF lw_filetype NE c_bin.
+    CLEAR lw_filelength.
+  ENDIF.
+
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename                = lw_localdir
+      filetype                = lw_filetype
+      confirm_overwrite       = space
+      bin_filesize            = lw_filelength
+    CHANGING
+      data_tab                = <lt_file>
+    EXCEPTIONS
+      file_write_error        = 1
+      no_batch                = 2
+      gui_refuse_filetransfer = 3
+      invalid_type            = 4
+      no_authority            = 5
+      unknown_error           = 6
+      header_not_allowed      = 7
+      separator_not_allowed   = 8
+      filesize_not_allowed    = 9
+      header_too_long         = 10
+      dp_error_create         = 11
+      dp_error_send           = 12
+      dp_error_write          = 13
+      unknown_dp_error        = 14
+      access_denied           = 15
+      dp_out_of_memory        = 16
+      disk_full               = 17
+      dp_timeout              = 18
+      file_not_found          = 19
+      dataprovider_exception  = 20
+      control_flush_error     = 21
+      not_supported_by_gui    = 22
+      error_no_gui            = 23
+      OTHERS                  = 24.
+  IF sy-subrc NE 0.
+    MESSAGE 'Cannot create local file'(e11) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+  FREE <lt_file>.
+
+  IF pw_open = c_open_yes.
+    CALL METHOD cl_gui_frontend_services=>execute
+      EXPORTING
+        document               = lw_localdir
+      EXCEPTIONS
+        cntl_error             = 1
+        error_no_gui           = 2
+        bad_parameter          = 3
+        file_not_found         = 4
+        path_not_found         = 5
+        file_extension_unknown = 6
+        error_execute_failed   = 7
+        synchronous_failed     = 8
+        not_supported_by_gui   = 9
+        OTHERS                 = 10.
+    IF sy-subrc <> 0.
+      MESSAGE 'Cannot open the local file/folder'(e27)
+              TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    ENDIF.
+  ELSEIF pw_open = c_open_as.
+    CONCATENATE 'SHELL32. DLL,OpenAs_RunDLL' lw_localdir
+                INTO lw_localdir SEPARATED BY space.
+    CALL METHOD cl_gui_frontend_services=>execute
+      EXPORTING
+        application            = 'RUNDLL32.EXE'
+        parameter              = lw_localdir
+      EXCEPTIONS
+        cntl_error             = 1
+        error_no_gui           = 2
+        bad_parameter          = 3
+        file_not_found         = 4
+        path_not_found         = 5
+        file_extension_unknown = 6
+        error_execute_failed   = 7
+        synchronous_failed     = 8
+        not_supported_by_gui   = 9
+        OTHERS                 = 10.
+    IF sy-subrc <> 0.
+      MESSAGE 'Cannot open the local file/folder'(e27)
+              TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    ENDIF.
+  ELSE.
+    o_server_command->commit( ).
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  SAVE_LOCAL_TO_REMOTE
+*&---------------------------------------------------------------------*
+*       Upload file from local pc to remote server
+*----------------------------------------------------------------------*
+FORM save_local_to_remote USING pw_local_path TYPE c
+                                pw_local_name TYPE c
+                                pw_remote_path TYPE c
+                                pw_remote_name TYPE c
+                                pw_transfermode TYPE c.
+
+  DATA : lw_localdir    TYPE string,
+         lw_remote_name TYPE string.
+  DATA : lw_local_path(1000) TYPE c,
+         lw_file(1000)       TYPE c,
+         ls_file             TYPE string,
+         lt_file             LIKE TABLE OF ls_file,
+         ls_file_bin(1000)   TYPE x,
+         lt_file_bin         LIKE TABLE OF ls_file_bin,
+         lw_filetype(10)     TYPE c,
+         lw_len              TYPE i,
+         lw_string           TYPE string,
+         lw_string2          TYPE string,
+         lw_action(1)        TYPE c,
+         lw_filelength       TYPE i.
+  FIELD-SYMBOLS: <lt_file> TYPE STANDARD TABLE,
+                 <ls_file> TYPE any.
+
+  IF s_auth-upload NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_localdir = pw_local_path.
+  IF lw_localdir IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lw_local_path = lw_localdir.
+  lw_len = strlen( lw_local_path ).
+  lw_len = lw_len - 1.
+  IF lw_local_path+lw_len(1) NE c_local_slash.
+    CONCATENATE lw_localdir c_local_slash INTO lw_localdir.
+  ENDIF.
+
+  lw_remote_name = pw_remote_name.
+  TRANSLATE lw_remote_name USING ' _'.
+
+  IF w_force_transfer_mode IS INITIAL.
+    lw_filetype = pw_transfermode.
+  ELSE.
+    lw_filetype = w_force_transfer_mode.
+  ENDIF.
+
+  IF lw_filetype EQ c_bin.
+    ASSIGN lt_file_bin TO <lt_file>.
+  ELSE.
+    ASSIGN lt_file TO <lt_file>.
+  ENDIF.
+  IF NOT <lt_file> IS ASSIGNED.
+    RETURN.
+  ENDIF.
+
+  CONCATENATE lw_localdir pw_local_name INTO lw_localdir.
+  CONCATENATE pw_remote_path lw_remote_name INTO lw_file.
+  OPEN DATASET lw_file FOR INPUT IN BINARY MODE.
+  IF sy-subrc = 0.
+    CLOSE DATASET lw_file.
+    IF s_auth-overwrite NE abap_true.
+      MESSAGE 'Remote file already exist, cannot upload'(e17)
+              TYPE c_msg_success DISPLAY LIKE c_msg_error.
+      RETURN.
+    ENDIF.
+    lw_string = '# already exist in #. Overwrite ?'(t18).
+    lw_string2 = o_server_command->file_protect( lw_localdir ).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_string2.
+    lw_string2 = pw_remote_path.
+    lw_string2 = o_server_command->file_protect( lw_string2 ).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_string2.
+    lw_string2 = 'Overwrite'(t23).
+  ELSE.
+    lw_string = 'Upload # to # ?'(t04).
+    lw_string2 = o_server_command->file_protect( lw_localdir ).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_string2.
+    lw_string2 = pw_remote_path.
+    lw_string2 = o_server_command->file_protect( lw_string2 ).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_string2.
+    lw_string2 = 'Upload'(t25).
+  ENDIF.
+
+  PERFORM confirm_action USING lw_string lw_string2 CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD cl_gui_frontend_services=>gui_upload
+    EXPORTING
+      filename                = lw_localdir
+      filetype                = lw_filetype
+    IMPORTING
+      filelength              = lw_filelength
+    CHANGING
+      data_tab                = <lt_file>
+    EXCEPTIONS
+      file_read_error         = 1
+      no_batch                = 2
+      gui_refuse_filetransfer = 3
+      invalid_type            = 4
+      no_authority            = 5
+      unknown_error           = 6
+      header_not_allowed      = 7
+      separator_not_allowed   = 8
+      header_too_long         = 10
+      unknown_dp_error        = 14
+      access_denied           = 15
+      dp_out_of_memory        = 16
+      disk_full               = 17
+      dp_timeout              = 18
+      not_supported_by_gui    = 22
+      error_no_gui            = 23
+      OTHERS                  = 24.
+  IF sy-subrc NE 0.
+    MESSAGE 'Cannot read local file'(e18) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF lw_filetype = c_bin.
+    OPEN DATASET lw_file FOR OUTPUT IN BINARY MODE.
+  ELSE.
+    OPEN DATASET lw_file FOR OUTPUT IN TEXT MODE ENCODING NON-UNICODE.
+  ENDIF.
+  IF sy-subrc <> 0.
+    MESSAGE 'Cannot create remote file'(e19) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+    RETURN.
+  ELSE.
+    LOOP AT <lt_file> ASSIGNING <ls_file>.
+      IF lw_filetype = c_bin.
+        IF lw_filelength > 1000.
+          lw_len = 1000.
+        ELSE.
+          lw_len = lw_filelength.
+        ENDIF.
+        TRANSFER <ls_file> TO lw_file LENGTH lw_len.
+        lw_filelength = lw_filelength - lw_len.
+      ELSE.
+        TRANSFER <ls_file> TO lw_file.
+      ENDIF.
+    ENDLOOP.
+    CLOSE DATASET lw_file.
+  ENDIF.
+
+  FREE <lt_file>.
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  compress_item
+*&---------------------------------------------------------------------*
+FORM compress_item USING pw_name TYPE c.
+  DATA : lw_name      TYPE string,
+         lw_string    TYPE string,
+         lw_action(1) TYPE c.
+
+  IF s_auth-zip NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_name.
+  lw_name = o_server_command->file_protect( lw_name ).
+
+  lw_string = 'Compress # ? '(t13).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  PERFORM confirm_action USING lw_string 'Compress'(t27) CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_name.
+  CALL METHOD o_server_command->compress
+    EXPORTING
+      i_file = lw_name.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_FILE
+*&---------------------------------------------------------------------*
+FORM delete_file USING pw_name TYPE c.
+  DATA : lw_string    TYPE string,
+         lw_action(1) TYPE c,
+         lw_name      TYPE string.
+
+  IF s_auth-delete_file NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_name.
+  lw_name = o_server_command->file_protect( lw_name ).
+
+  lw_string = 'Delete file # ?'(t12).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  PERFORM confirm_action USING lw_string 'Delete'(t26) CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD o_server_command->delete
+    EXPORTING
+      i_source = lw_name
+      i_mode   = lif_server_command=>c_copymode_file.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_FOLDER
+*&---------------------------------------------------------------------*
+FORM delete_folder USING pw_target TYPE c.
+  DATA : lw_string    TYPE string,
+         lw_action(1) TYPE c,
+         lw_name      TYPE string.
+
+  IF s_auth-delete_folder NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_target.
+  lw_name = o_server_command->file_protect( lw_name ).
+
+  lw_string = 'Delete folder # and all there content ?'(t11).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  PERFORM confirm_action USING lw_string 'Delete'(t26) CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD o_server_command->delete
+    EXPORTING
+      i_source = lw_name
+      i_mode   = lif_server_command=>c_copymode_folder.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  confirm_action
+*&---------------------------------------------------------------------*
+FORM confirm_action USING pw_text TYPE string
+                          pw_btn1 TYPE string
+                    CHANGING pw_ok TYPE c.
+  CALL FUNCTION 'POPUP_TO_CONFIRM'
+    EXPORTING
+      titlebar              = 'Warning :  critical operation'(t10)
+      text_question         = pw_text
+      default_button        = '2'
+      display_cancel_button = space
+      text_button_1         = pw_btn1
+      icon_button_1         = '@01@'
+      text_button_2         = 'Cancel'(t36)
+      icon_button_2         = '@02@'
+    IMPORTING
+      answer                = pw_ok
+    EXCEPTIONS
+      text_not_found        = 1
+      OTHERS                = 2.
+  IF sy-subrc <> 0 OR pw_ok NE 1.
+    CLEAR pw_ok.
+    MESSAGE 'Action cancelled'(e12) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+  ELSE.
+    pw_ok = abap_true.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GOTO_SHORTCUT
+*&---------------------------------------------------------------------*
+FORM goto_shortcut USING pw_path TYPE c
+                         pw_type TYPE i
+                         pw_donotopen TYPE c.
+  DATA : ls_folder(500)   TYPE c,
+         lt_folders       LIKE TABLE OF ls_folder,
+         ls_current_node  LIKE s_node,
+         lw_new_path      LIKE s_node-path,
+         lw_current_index TYPE i.
+
+  IF s_auth-shortcut NE abap_true AND pw_type = 1.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF s_auth-paste_path NE abap_true AND pw_type = 0.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF s_customize-root_path_len > 1
+  AND pw_path(s_customize-root_path_len) NE s_customize-root_path.
+    RETURN.
+  ENDIF.
+
+  IF s_customize-root_path_len > 1.
+    SPLIT pw_path+s_customize-root_path_len AT o_server_command->slash INTO TABLE lt_folders.
+  ELSEIF pw_path(1) = o_server_command->slash AND pw_path+1(1) = o_server_command->slash.
+    SPLIT pw_path+2 AT o_server_command->slash INTO TABLE lt_folders.
+    READ TABLE lt_folders INTO ls_folder INDEX 1.
+    CONCATENATE o_server_command->slash o_server_command->slash ls_folder
+               INTO ls_folder.
+    MODIFY lt_folders FROM ls_folder INDEX 1.
+
+    CONCATENATE ls_folder o_server_command->slash INTO lw_new_path.
+    READ TABLE t_nodes2 TRANSPORTING NO FIELDS WITH KEY path = lw_new_path.
+    IF sy-subrc NE 0.
+      CLEAR ls_current_node.
+      PERFORM add_new_server_remote USING ls_folder ls_current_node.
+    ENDIF.
+  ELSE.
+    SPLIT pw_path AT o_server_command->slash INTO TABLE lt_folders.
+  ENDIF.
+
+  READ TABLE t_nodes2 INTO s_node INDEX 1.
+  ls_current_node = s_node.
+  lw_current_index = 1.
+
+  IF ls_current_node-notreadable NE space
+  OR ( pw_path(1) = o_server_command->slash AND pw_path+1(1) = o_server_command->slash
+       AND s_customize-root_path_len LE 1 ).
+    CLEAR ls_current_node-path.
+  ENDIF.
+
+  LOOP AT lt_folders INTO ls_folder.
+    CHECK NOT ls_folder IS INITIAL.
+
+    CONCATENATE ls_current_node-path ls_folder o_server_command->slash
+                INTO lw_new_path.
+    READ TABLE t_nodes2 INTO s_node WITH KEY path = lw_new_path.
+    IF sy-subrc NE 0.
+      PERFORM get_sub_nodes2 USING ls_current_node lw_current_index.
+      READ TABLE t_nodes2 INTO s_node WITH KEY path = lw_new_path.
+    ENDIF.
+    IF sy-subrc NE 0 AND pw_path(1) = o_server_command->slash
+    AND pw_path+1(1) = o_server_command->slash
+    AND s_customize-root_path_len LE 1.
+      PERFORM add_new_server_remote USING ls_folder ls_current_node.
+      READ TABLE t_nodes2 INTO s_node WITH KEY path = lw_new_path.
+    ENDIF.
+    IF sy-subrc = 0.
+      ls_current_node = s_node.
+      lw_current_index = sy-tabix.
+    ELSE.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+
+  IF pw_donotopen NE space.
+    RETURN.
+  ENDIF.
+
+  PERFORM change_remote_folder USING ls_current_node-node_key.
+
+  CALL METHOD o_tree2->set_selected_node
+    EXPORTING
+      node_key = ls_current_node-node_key.
+
+  CALL METHOD o_tree2->set_top_node
+    EXPORTING
+      node_key = ls_current_node-node_key.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GOTO_SHORTCUT_LOCAL
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  GOTO_SHORTCUT_LOCAL (continued)
+*&---------------------------------------------------------------------*
+FORM goto_shortcut_local USING pw_path TYPE c.
+  DATA : BEGIN OF ls_folder,
+           value(500) TYPE c,
+         END OF ls_folder,
+         lt_folders       LIKE TABLE OF ls_folder,
+         ls_current_node  LIKE s_node,
+         lw_new_path      LIKE s_node-path,
+         lw_current_index TYPE i.
+
+  READ TABLE t_nodes1 INTO s_node WITH KEY path = pw_path.
+  IF sy-subrc = 0.
+    ls_current_node = s_node.
+  ELSE.
+    SPLIT pw_path AT c_local_slash INTO TABLE lt_folders.
+    DELETE lt_folders WHERE value IS INITIAL.
+
+    READ TABLE t_nodes1 INTO s_node INDEX 1.
+    ls_current_node = s_node.
+    lw_current_index = 1.
+
+    LOOP AT lt_folders INTO ls_folder.
+      CONCATENATE ls_current_node-path ls_folder c_local_slash
+                  INTO lw_new_path.
+      READ TABLE t_nodes1 INTO s_node WITH KEY path = lw_new_path.
+      IF sy-subrc NE 0.
+        PERFORM get_sub_nodes1 USING ls_current_node lw_current_index.
+        READ TABLE t_nodes1 INTO s_node WITH KEY path = lw_new_path.
+      ENDIF.
+      IF sy-subrc = 0.
+        ls_current_node = s_node.
+        lw_current_index = sy-tabix.
+      ELSE.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  PERFORM change_local_folder USING ls_current_node-node_key.
+
+  CALL METHOD o_tree1->set_selected_node
+    EXPORTING
+      node_key = ls_current_node-node_key.
+
+  CALL METHOD o_tree1->set_top_node
+    EXPORTING
+      node_key = ls_current_node-node_key.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CREATE_FOLDER
+*&---------------------------------------------------------------------*
+FORM create_folder USING pw_path TYPE c.
+  DATA : lw_string    TYPE string,
+         lw_action(1) TYPE c,
+         ls_field     TYPE sval,
+         lt_fields    LIKE TABLE OF ls_field,
+         lw_name      TYPE string.
+
+  IF s_auth-create_folder NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  ls_field-tabname = 'DXFILE'.
+  ls_field-fieldname = 'FILENAME'.
+  ls_field-field_obl = abap_true.
+  ls_field-value = 'newfolder'(h31).
+  APPEND ls_field TO lt_fields.
+  CALL FUNCTION 'POPUP_GET_VALUES'
+    EXPORTING
+      popup_title = 'Enter new folder name'(t19)
+    TABLES
+      fields      = lt_fields
+    EXCEPTIONS
+      OTHERS      = 1.
+  IF sy-subrc <> 0.
+    MESSAGE 'Action cancelled'(e12) TYPE c_msg_success
+        DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  READ TABLE lt_fields INTO ls_field INDEX 1.
+  lw_string = ls_field-value.
+  TRANSLATE lw_string TO UPPER CASE.
+  IF ls_field-value IS INITIAL
+  OR NOT lw_string CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+. '.
+    MESSAGE 'Forbidden character, operation cancelled'(e16)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CONCATENATE pw_path ls_field-value INTO lw_name.
+  lw_name = o_server_command->file_protect( lw_name ).
+
+  lw_string = 'Create folder # ?'(t09).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  PERFORM confirm_action USING lw_string 'Create'(t28) CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD o_server_command->create_folder
+    EXPORTING
+      i_newfolder = lw_name.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CLIPBOARD_EXPORT
+*&---------------------------------------------------------------------*
+FORM clipboard_export USING pw_name TYPE c pw_type TYPE i.
+  DATA : lw_rc         TYPE i,
+         ls_data(1000) TYPE c,
+         lt_data       LIKE TABLE OF ls_data.
+
+  IF s_auth-copy_path NE abap_true AND pw_type = 1.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  ls_data = pw_name.
+  APPEND ls_data TO lt_data.
+
+  CALL METHOD cl_gui_frontend_services=>clipboard_export
+    IMPORTING
+      data = lt_data
+    CHANGING
+      rc   = lw_rc.
+
+  MESSAGE 'Path sent to clipbard'(t08) TYPE c_msg_success.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CLIPBOARD_IMPORT
+*&---------------------------------------------------------------------*
+FORM clipboard_import.
+  DATA: ls_data(1000) TYPE c,
+        lt_data       LIKE TABLE OF ls_data,
+        lw_string     TYPE string.
+
+  IF s_auth-paste_path NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD cl_gui_frontend_services=>clipboard_import
+    IMPORTING
+      data = lt_data.
+  READ TABLE lt_data INTO ls_data INDEX 1.
+  IF sy-subrc NE 0.
+    RETURN.
+  ENDIF.
+
+  IF s_customize-root_path_len > 1
+  AND ls_data(s_customize-root_path_len) NE s_customize-root_path.
+    MESSAGE 'Clipboard content is not a valid path'(e14)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_string = ls_data.
+  TRANSLATE lw_string TO UPPER CASE.
+  IF NOT lw_string CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+./\: '.
+    MESSAGE 'Clipboard content is not a valid path'(e14)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  PERFORM goto_shortcut USING ls_data 0 space.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  DUPLICATE_ITEM
+*&---------------------------------------------------------------------*
+FORM duplicate_item USING pw_name TYPE c
+                          pw_type TYPE i.
+  DATA lw_pos TYPE i.
+  DATA : lw_string      TYPE string,
+         lw_action(1)   TYPE c,
+         lw_name        TYPE string,
+         lw_name_source TYPE string.
+
+  IF s_auth-duplicate_file NE abap_true AND pw_type = 0.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF s_auth-duplicate_folder NE abap_true AND pw_type = 1.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  find_last_occurrence '.' pw_name lw_pos.
+
+  lw_name = pw_name.
+  DO.
+    IF sy-index > 5.
+      MESSAGE 'Too many copy exists.  Delete or rename old copies'(e15)
+              TYPE c_msg_success DISPLAY LIKE c_msg_error.
+      CLEAR lw_name.
+      EXIT.
+    ENDIF.
+    IF lw_pos NE 0.
+      CONCATENATE lw_name(lw_pos) '_copy' lw_name+lw_pos INTO lw_name.
+    ELSE.
+      CONCATENATE lw_name '_copy' INTO lw_name.
+    ENDIF.
+    OPEN DATASET lw_name FOR INPUT IN BINARY MODE.
+    IF sy-subrc EQ 8.
+      EXIT.
+    ENDIF.
+    CLOSE DATASET lw_name.
+  ENDDO.
+  IF lw_name IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lw_name_source = pw_name.
+  lw_name_source = o_server_command->file_protect( lw_name_source ).
+  lw_name = o_server_command->file_protect( lw_name ).
+
+  lw_string = 'Duplicate # to # ?'(t07).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string
+                           WITH lw_name_source.
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  PERFORM confirm_action USING lw_string 'Duplicate'(t29)
+                         CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  IF pw_type = 0.
+    CALL METHOD o_server_command->copy
+      EXPORTING
+        i_source = lw_name_source
+        i_target = lw_name
+        i_mode   = lif_server_command=>c_copymode_file.
+  ELSE.
+    CALL METHOD o_server_command->copy
+      EXPORTING
+        i_source = lw_name_source
+        i_target = lw_name
+        i_mode   = lif_server_command=>c_copymode_folder.
+  ENDIF.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  REFRESH_TREE2
+*&---------------------------------------------------------------------*
+FORM refresh_tree2 USING pw_node LIKE s_node.
+  DATA lw_index TYPE i.
+  DATA : lw_deleted(1) TYPE c,
+         ls_node       LIKE s_node.
+
+  DELETE t_nodes2 WHERE relatkey = pw_node-node_key.
+
+  lw_deleted = abap_true.
+  WHILE lw_deleted = abap_true.
+    CLEAR lw_deleted.
+    LOOP AT t_nodes2 INTO ls_node WHERE NOT relatkey IS INITIAL.
+      lw_index = sy-tabix.
+      READ TABLE t_nodes2 WITH KEY node_key = ls_node-relatkey
+                 TRANSPORTING NO FIELDS.
+      IF sy-subrc NE 0.
+        DELETE t_nodes2 INDEX lw_index.
+        lw_deleted = abap_true.
+        CONTINUE.
+      ENDIF.
+    ENDLOOP.
+  ENDWHILE.
+  READ TABLE t_nodes2 INTO ls_node
+             WITH KEY node_key = pw_node-node_key.
+  lw_index = sy-tabix.
+  CLEAR ls_node-read.
+  MODIFY t_nodes2 FROM ls_node INDEX lw_index TRANSPORTING read.
+
+  CALL METHOD o_tree2->delete_all_nodes.
+
+  CALL METHOD o_tree2->add_nodes
+    EXPORTING
+      node_table           = t_nodes2
+      table_structure_name = 'MTREESNODE'.
+  CALL METHOD cl_gui_cfw=>flush.
+
+  PERFORM change_remote_folder USING ls_node-node_key.
+
+  CALL METHOD o_tree2->set_selected_node
+    EXPORTING
+      node_key = ls_node-node_key.
+
+  CALL METHOD o_tree2->set_top_node
+    EXPORTING
+      node_key = ls_node-node_key.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  RENAME_ITEM
+*&---------------------------------------------------------------------*
+FORM rename_item USING pw_path TYPE c
+                       pw_name TYPE c
+                       pw_type TYPE i.
+  DATA : lw_name      LIKE s_node-path,
+         lw_source    TYPE string,
+         lw_target    TYPE string,
+         ls_field     TYPE sval,
+         lt_fields    LIKE TABLE OF ls_field,
+         lw_action(1) TYPE c,
+         lw_string    TYPE string.
+
+  IF s_auth-rename_file NE abap_true AND pw_type = 0.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF s_auth-rename_folder NE abap_true AND pw_type = 1.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_name.
+  ls_field-tabname = 'DXFILE'.
+  ls_field-fieldname = 'FILENAME'.
+  ls_field-field_obl = abap_true.
+  ls_field-value = pw_name.
+  APPEND ls_field TO lt_fields.
+
+  CALL FUNCTION 'POPUP_GET_VALUES'
+    EXPORTING
+      popup_title = 'Enter new name'(t06)
+    TABLES
+      fields      = lt_fields
+    EXCEPTIONS
+      OTHERS      = 1.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+  READ TABLE lt_fields INTO ls_field INDEX 1.
+  lw_name = ls_field-value.
+  IF lw_name = pw_name OR lw_name IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lw_string = lw_name.
+  TRANSLATE lw_string TO UPPER CASE.
+  IF NOT lw_string CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+.'.
+    MESSAGE 'Forbidden character, operation cancelled'(e16)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CONCATENATE pw_path pw_name INTO lw_source.
+  lw_source = o_server_command->file_protect( lw_source ).
+  CONCATENATE pw_path lw_name INTO lw_target.
+  lw_target = o_server_command->file_protect( lw_target ).
+
+  lw_string = 'Rename # to # ?'(t05).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_source.
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_target.
+  PERFORM confirm_action USING lw_string 'Rename'(t30) CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD o_server_command->rename
+    EXPORTING
+      i_source = lw_source
+      i_target = lw_target.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  UNCOMPRESS_FILE
+*&---------------------------------------------------------------------*
+FORM uncompress_file USING pw_path TYPE c
+                           pw_name TYPE c.
+  DATA : lw_name      TYPE string,
+         lw_path      TYPE string,
+         lw_string    TYPE string,
+         lw_action(1) TYPE c.
+
+  IF s_auth-unzip NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CONCATENATE pw_path pw_name INTO lw_name.
+  lw_name = o_server_command->file_protect( lw_name ).
+
+  lw_string = 'Uncompress # ? '(t03).
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  PERFORM confirm_action USING lw_string 'Uncompress'(t31) CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_name.
+  lw_path = pw_path.
+  CALL METHOD o_server_command->uncompress
+    EXPORTING
+      i_file = lw_name
+      i_path = lw_path.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  timestamp_convert
+*&---------------------------------------------------------------------*
+FORM timestamp_convert USING pw_timestamp TYPE p
+                             pw_date TYPE d
+                             pw_time TYPE t.
+  DATA : lw_opcode     TYPE x,
+         lw_timestamp  TYPE i,
+         lw_tz         TYPE systzonlo,
+         lw_abapstamp  TYPE char14,
+         lw_abaptstamp TYPE timestamp.
+
+  IF sy-zonlo = space.
+    lw_tz = sy-tzone.
+    CONCATENATE 'UTC+' lw_tz INTO lw_tz.
+  ELSE.
+    lw_tz = sy-zonlo.
+  ENDIF.
+
+  lw_opcode = 3.
+  lw_timestamp = pw_timestamp.
+  CALL 'RstrDateConv' ID 'OPCODE'    FIELD lw_opcode
+                      ID 'TIMESTAMP' FIELD lw_timestamp
+                      ID 'ABAPSTAMP' FIELD lw_abapstamp.
+
+  lw_abaptstamp = lw_abapstamp.
+  CONVERT TIME STAMP lw_abaptstamp TIME ZONE lw_tz
+          INTO DATE pw_date TIME pw_time.
+  IF sy-subrc <> 0.
+    pw_date = lw_abapstamp(8).
+    pw_time = lw_abapstamp+8.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  COPY_ITEM
+*&---------------------------------------------------------------------*
+FORM copy_item USING pw_name TYPE c
+                     pw_path_target TYPE c
+                     pw_action TYPE i
+                     pw_type TYPE i.
+  DATA : lw_string    TYPE string,
+         lw_string2   TYPE string,
+         lw_action(1) TYPE c,
+         lw_name      TYPE string,
+         lw_target    TYPE string,
+         lw_pos       TYPE i.
+
+  IF s_auth-move_file NE abap_true AND pw_type = 0.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF s_auth-move_folder NE abap_true AND pw_type = 1.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  lw_name = pw_name.
+  lw_name = o_server_command->file_protect( lw_name ).
+  find_last_occurrence o_server_command->slash pw_name lw_pos.
+  lw_pos = lw_pos + 1.
+  CONCATENATE pw_path_target pw_name+lw_pos INTO lw_target.
+  lw_target = o_server_command->file_protect( lw_target ).
+
+  IF pw_action = 1.
+    lw_string = 'Copy # to # ?'(t01).
+    lw_string2 = 'Copy'(t32).
+  ELSE.
+    lw_string = 'Move # to # ?'(t02).
+    lw_string2 = 'Move'(t33).
+  ENDIF.
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+  REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_target.
+  PERFORM confirm_action USING lw_string lw_string2 CHANGING lw_action.
+  IF lw_action = space.
+    RETURN.
+  ENDIF.
+
+  IF pw_action = 1.
+    IF pw_type = 0.
+      CALL METHOD o_server_command->copy
+        EXPORTING
+          i_source = lw_name
+          i_target = lw_target
+          i_mode   = lif_server_command=>c_copymode_file.
+    ELSE.
+      CALL METHOD o_server_command->copy
+        EXPORTING
+          i_source = lw_name
+          i_target = lw_target
+          i_mode   = lif_server_command=>c_copymode_folder.
+    ENDIF.
+  ELSE.
+    CALL METHOD o_server_command->move
+      EXPORTING
+        i_source = lw_name
+        i_target = lw_target.
+  ENDIF.
+
+  o_server_command->commit( ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_ROOT_PATH
+*&---------------------------------------------------------------------*
+FORM init_root_path.
+  IF s_customize-root_path IS INITIAL.
+    s_customize-root_path = o_server_command->slash.
+  ENDIF.
+
+  CALL 'C_SAPGPARAM' ID 'NAME' FIELD 'rdisp/myname'
+                     ID 'VALUE' FIELD w_server_name.
+
+  IF s_customize-root_name IS INITIAL.
+    s_customize-root_name = w_server_name.
+  ENDIF.
+
+  s_customize-root_path_len = strlen( s_customize-root_path ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  create_shortcut
+*&---------------------------------------------------------------------*
+FORM create_shortcut USING pw_path TYPE c.
+  DATA : ls_user_dir TYPE user_dir,
+         ls_field    TYPE sval,
+         lt_fields   LIKE TABLE OF ls_field,
+         lw_dirname  TYPE user_dir-dirname,
+         lw_rc(1)    TYPE c.
+
+  IF s_auth-create_shortcut NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  ls_field-tabname = 'ADRP'.
+  ls_field-fieldname = 'NAME_TEXT'.
+  ls_field-fieldtext = 'Path'(h22).
+  ls_field-field_obl = abap_true.
+  ls_field-value = pw_path.
+  APPEND ls_field TO lt_fields.
+  ls_field-tabname = 'DD03T'.
+  ls_field-fieldname = 'DDTEXT'.
+  ls_field-fieldtext = 'Description'(h34).
+  APPEND ls_field TO lt_fields.
+
+  CALL FUNCTION 'POPUP_GET_VALUES'
+    EXPORTING
+      popup_title = 'Enter name and server path'(t15)
+    IMPORTING
+      returncode  = lw_rc
+    TABLES
+      fields      = lt_fields
+    EXCEPTIONS
+      OTHERS      = 1.
+  IF sy-subrc <> 0 OR lw_rc NE space.
+    RETURN.
+  ENDIF.
+
+  READ TABLE lt_fields INTO ls_field INDEX 1.
+  ls_user_dir-dirname = ls_field-value.
+  IF ls_user_dir-dirname IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  READ TABLE lt_fields INTO ls_field INDEX 2.
+  ls_user_dir-aliass = ls_field-value.
+  IF ls_user_dir-aliass IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  ls_user_dir-svrname = c_server_all.
+
+  SELECT SINGLE dirname INTO lw_dirname
+         FROM user_dir
+         WHERE dirname = ls_user_dir-dirname.
+  IF sy-subrc = 0.
+    MESSAGE 'This shortcut already exists'(e22)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  INSERT user_dir FROM ls_user_dir.
+  COMMIT WORK AND WAIT.
+
+  PERFORM get_shortcuts.
+
+  MESSAGE 'Shortcut created'(t16) TYPE c_msg_success.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_SHORTCUT
+*&---------------------------------------------------------------------*
+FORM delete_shortcut.
+  DATA : lt_fieldcat  TYPE slis_t_fieldcat_alv,
+         ls_fieldcat  LIKE LINE OF lt_fieldcat,
+         lw_exit(1)   TYPE c,
+         lw_action(1) TYPE c,
+         lw_string    TYPE string,
+         lw_string2   TYPE string,
+         lw_count     TYPE i.
+
+  IF s_auth-delete_shortcut NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  IF t_shortcuts IS INITIAL.
+    MESSAGE 'There is no shortcut to delete'(e25)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  ls_fieldcat-fieldname = 'SELKZ'.
+  ls_fieldcat-checkbox = abap_true.
+  ls_fieldcat-reptext_ddic = 'Selection'(h35).
+  ls_fieldcat-datatype = 'CHAR'.
+  ls_fieldcat-fix_column = abap_true.
+  ls_fieldcat-outputlen = 3.
+  APPEND ls_fieldcat TO lt_fieldcat.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'ALIASS'.
+  ls_fieldcat-datatype = 'CHAR'.
+  ls_fieldcat-outputlen = 30.
+  ls_fieldcat-reptext_ddic = 'Name'(h36).
+  APPEND ls_fieldcat TO lt_fieldcat.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'DIRNAME'.
+  ls_fieldcat-datatype = 'CHAR'.
+  ls_fieldcat-outputlen = 75.
+  ls_fieldcat-reptext_ddic = 'Path'(h37).
+  APPEND ls_fieldcat TO lt_fieldcat.
+
+  CALL FUNCTION 'REUSE_ALV_POPUP_TO_SELECT'
+    EXPORTING
+      i_title               = 'Choose shortcuts to delete'(t20)
+      i_selection           = abap_true
+      i_allow_no_selection  = space
+      i_zebra               = abap_true
+      i_screen_start_column = 10
+      i_screen_start_line   = 1
+      i_screen_end_column   = 120
+      i_screen_end_line     = 20
+      i_checkbox_fieldname  = 'SELKZ'
+      i_tabname             = 'T_SHORTCUTS'
+      it_fieldcat           = lt_fieldcat
+    IMPORTING
+      e_exit                = lw_exit
+    TABLES
+      t_outtab              = t_shortcuts
+    EXCEPTIONS
+      OTHERS                = 4.
+  IF sy-subrc NE 0 OR lw_exit NE space.
+    MESSAGE 'Action cancelled'(e12) TYPE c_msg_success
+          DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CLEAR lw_count.
+  LOOP AT t_shortcuts INTO s_shortcut WHERE selkz = abap_true.
+    lw_string = 'Delete shortcut # for path # ?'(t21).
+    lw_string2 = s_shortcut-aliass.
+    lw_string2 = o_server_command->file_protect( lw_string2 ).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string
+                             WITH lw_string2.
+    lw_string2 = s_shortcut-dirname.
+    lw_string2 = o_server_command->file_protect( lw_string2 ).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string
+                             WITH lw_string2.
+    PERFORM confirm_action USING lw_string 'Delete'(t26) CHANGING lw_action.
+    IF lw_action = space.
+      CONTINUE.
+    ENDIF.
+
+    DELETE FROM user_dir WHERE dirname = s_shortcut-dirname.
+    lw_count = lw_count + 1.
+  ENDLOOP.
+
+  IF lw_count = 0.
+    RETURN.
+  ENDIF.
+
+  COMMIT WORK AND WAIT.
+
+  lw_string = lw_count.
+  CONCATENATE lw_string 'shortcuts deleted'(t34)
+              INTO lw_string SEPARATED BY space.
+  MESSAGE lw_string TYPE c_msg_success.
+
+  PERFORM get_shortcuts.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHORTCUTS
+*&---------------------------------------------------------------------*
+FORM get_shortcuts.
+  DATA lw_len TYPE i.
+
+  SELECT dirname aliass FROM user_dir
+    INTO TABLE t_shortcuts
+    WHERE svrname = w_server_name.
+
+  SELECT dirname aliass FROM user_dir
+    APPENDING TABLE t_shortcuts
+    WHERE svrname = c_server_all.
+
+  LOOP AT t_shortcuts INTO s_shortcut.
+    lw_len = strlen( s_shortcut-dirname ).
+    IF s_customize-root_path_len GT 1
+    AND ( lw_len LT s_customize-root_path_len
+    OR s_shortcut-dirname(s_customize-root_path_len)
+       NE s_customize-root_path ).
+      DELETE t_shortcuts.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  CHMOD_DIALOG
+*&---------------------------------------------------------------------*
+*       Display CHMOD dialog using dialogbox container
+*----------------------------------------------------------------------*
+FORM chmod_dialog USING pw_path LIKE s_detail2-path
+                        pw_name LIKE s_detail2-name
+                        pw_mode LIKE s_detail2-mode
+                        pw_owner LIKE s_detail2-owner
+                        pw_nodekey TYPE tv_nodekey.
+
+* Store values for later processing
+  w_chmod_path = pw_path.
+  w_chmod_name = pw_name.
+  w_chmod_mode = pw_mode.
+  w_chmod_owner = pw_owner.
+  w_chmod_nodekey = pw_nodekey.
+  w_chmod_to_set = pw_mode.
+  w_owner_to_set = pw_owner.
+  w_chmod_ok = abap_false.
+
+* Create dialog box container
+  IF o_dialog_chmod IS BOUND.
+    o_dialog_chmod->free( ).
+    FREE o_dialog_chmod.
+    FREE o_pbox_chmod.
+  ENDIF.
+
+  CREATE OBJECT o_dialog_chmod
+    EXPORTING
+      width   = 350
+      height  = 300
+      top     = 100
+      left    = 300
+      caption = 'Change Attributes'(m25)
+    EXCEPTIONS
+      OTHERS  = 1.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error creating dialog' TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+* Set handler for dialog close
+  SET HANDLER o_handle_event->handle_chmod_ok FOR o_dialog_chmod.
+
+* Initialize CHMOD property box
+  PERFORM init_chmod_pbox.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  ATTRIB_DIALOG
+*&---------------------------------------------------------------------*
+*       Display Attributes dialog using dialogbox container
+*----------------------------------------------------------------------*
+FORM attrib_dialog USING pw_path LIKE s_detail2-path
+                         pw_name LIKE s_detail2-name
+                         pw_attrs LIKE s_detail2-attrs
+                         pw_nodekey TYPE tv_nodekey.
+
+* Store values for later processing
+  w_chmod_path = pw_path.
+  w_chmod_name = pw_name.
+  w_chmod_attrs = pw_attrs.
+  w_attrib_to_set = pw_attrs.
+  w_chmod_nodekey = pw_nodekey.
+  w_chmod_ok = abap_false.
+
+* Create dialog box container
+  IF o_dialog_chmod IS BOUND.
+    o_dialog_chmod->free( ).
+    FREE o_dialog_chmod.
+    FREE o_pbox_chmod.
+  ENDIF.
+
+  CREATE OBJECT o_dialog_chmod
+    EXPORTING
+      width   = 350
+      height  = 300
+      top     = 100
+      left    = 300
+      caption = 'Change Attributes'(m25)
+    EXCEPTIONS
+      OTHERS  = 1.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error creating dialog' TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+* Set handler for dialog close
+  SET HANDLER o_handle_event->handle_chmod_ok FOR o_dialog_chmod.
+
+* Initialize Attrib property box
+  PERFORM init_attrib_pbox.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_CHMOD_PBOX
+*&---------------------------------------------------------------------*
+*       Initialize CHMOD property box in dialog
+*----------------------------------------------------------------------*
+FORM init_chmod_pbox.
+  DATA : lt_ptab   TYPE wdy_wb_property_tab,
+         ls_ptab   TYPE wdy_wb_property,
+         lw_string TYPE string,
+         lw_val    TYPE i,
+         lw_pos    TYPE i.
+
+  DEFINE add_chmod_param.
+    CLEAR ls_ptab.
+    ls_ptab-name = &1.
+    IF &1 = 'SEPARATOR'.
+      ls_ptab-type = cl_wdy_wb_property_box=>separator.
+      ls_ptab-enabled = abap_true.
+    ELSE.
+      ls_ptab-type = cl_wdy_wb_property_box=>property_type_boolean.
+      ls_ptab-enabled = s_auth-chmod.
+      CASE &1.
+        WHEN 'READ'.
+          lw_val = 4.
+        WHEN 'WRITE'.
+          lw_val = 2.
+        WHEN 'EXE'.
+          lw_val = 1.
+      ENDCASE.
+      CASE &2.
+        WHEN 'OWNER'.
+          lw_pos = 0.
+        WHEN 'GROUP'.
+          lw_pos = 1.
+        WHEN 'OTHER'.
+          lw_pos = 2.
+      ENDCASE.
+      IF w_chmod_to_set+lw_pos(1) GE lw_val.
+        ls_ptab-value = abap_true.
+        w_chmod_to_set+lw_pos(1) = w_chmod_to_set+lw_pos(1) - lw_val.
+      ELSE.
+        ls_ptab-value = space.
+      ENDIF.
+    ENDIF.
+    ls_ptab-category = &2.
+    ls_ptab-display_name = &3.
+    ls_ptab-value_style = cl_wdy_wb_property_box=>style_enabled.
+    APPEND ls_ptab TO lt_ptab.
+  END-OF-DEFINITION.
+
+  CONCATENATE 'Owner'(h18) ' (' w_owner_to_set ')' INTO lw_string.
+  add_chmod_param 'SEPARATOR' 'OWNER' lw_string.
+  add_chmod_param 'READ' 'OWNER' 'Read'(h13).
+  add_chmod_param 'WRITE' 'OWNER' 'Write'(h14).
+  add_chmod_param 'EXE' 'OWNER' 'Execute'(h15).
+
+  add_chmod_param 'SEPARATOR' 'GROUP' 'File group'(h19).
+  add_chmod_param 'READ' 'GROUP' 'Read'(h13).
+  add_chmod_param 'WRITE' 'GROUP' 'Write'(h14).
+  add_chmod_param 'EXE' 'GROUP' 'Execute'(h15).
+
+  add_chmod_param 'SEPARATOR' 'OTHER' 'Others'(h20).
+  add_chmod_param 'READ' 'OTHER' 'Read'(h13).
+  add_chmod_param 'WRITE' 'OTHER' 'Write'(h14).
+  add_chmod_param 'EXE' 'OTHER' 'Execute'(h15).
+
+  CREATE OBJECT o_pbox_chmod
+    EXPORTING
+      parent = o_dialog_chmod
+    EXCEPTIONS
+      OTHERS = 4.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error creating property box' TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD o_pbox_chmod->initialize
+    EXPORTING
+      property_column_title = 'Property'(h16)
+      value_column_title    = 'Value'(h17).
+
+  o_pbox_chmod->set_enabled( s_auth-chmod ).
+
+  CALL METHOD o_pbox_chmod->set_properties
+    EXPORTING
+      properties = lt_ptab
+      refresh    = abap_true.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_ATTRIB_PBOX
+*&---------------------------------------------------------------------*
+*       Initialize Attrib property box in dialog
+*----------------------------------------------------------------------*
+FORM init_attrib_pbox.
+  DATA : lt_ptab TYPE wdy_wb_property_tab,
+         ls_ptab TYPE wdy_wb_property.
+
+  DEFINE add_attr_param.
+    CLEAR ls_ptab.
+    ls_ptab-name = &1.
+    ls_ptab-display_name = &2.
+    ls_ptab-enabled = abap_true.
+    IF &1 = 'SEPARATOR'.
+      ls_ptab-type = cl_wdy_wb_property_box=>separator.
+    ELSE.
+      ls_ptab-type = cl_wdy_wb_property_box=>property_type_boolean.
+      IF w_attrib_to_set CS ls_ptab-name(1).
+        ls_ptab-value = abap_true.
+      ENDIF.
+    ENDIF.
+    ls_ptab-value_style = cl_wdy_wb_property_box=>style_enabled.
+    APPEND ls_ptab TO lt_ptab.
+  END-OF-DEFINITION.
+
+  add_attr_param 'SEPARATOR' 'File Attributes'(h23).
+  add_attr_param 'READ' 'Read-Only'(h24).
+  add_attr_param 'ARCHIVE' 'Archive'(h25).
+  add_attr_param 'SYSTEM' 'System File'(h26).
+  add_attr_param 'HIDDEN' 'Hidden File'(h27).
+  add_attr_param 'INDEXED' 'Not Content Indexed'(h28).
+  add_attr_param 'COMPRESSED' 'Compressed'(h29).
+  add_attr_param 'OFFLINE' 'Offline'(h30).
+
+  CREATE OBJECT o_pbox_chmod
+    EXPORTING
+      parent = o_dialog_chmod
+    EXCEPTIONS
+      OTHERS = 4.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error creating property box' TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD o_pbox_chmod->initialize
+    EXPORTING
+      property_column_title = 'Property'(h16)
+      value_column_title    = 'Value'(h17).
+
+  o_pbox_chmod->set_enabled( s_auth-chmod ).
+
+  CALL METHOD o_pbox_chmod->set_properties
+    EXPORTING
+      properties = lt_ptab
+      refresh    = abap_true.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_CHMOD_RESULT
+*&---------------------------------------------------------------------*
+*       Process CHMOD/Attrib result after dialog close
+*----------------------------------------------------------------------*
+FORM process_chmod_result.
+  DATA : lt_ptab        TYPE wdy_wb_property_tab,
+         ls_ptab        TYPE wdy_wb_property,
+         lw_string      TYPE string,
+         lw_name        TYPE string,
+         lw_params      TYPE string,
+         lw_attrs_check LIKE w_attrib_to_set,
+         lw_att(2)      TYPE c,
+         lw_action(1)   TYPE c,
+         lw_offset      TYPE i,
+         lw_value       TYPE i.
+
+  IF o_pbox_chmod IS NOT BOUND OR s_auth-chmod NE abap_true.
+    RETURN.
+  ENDIF.
+
+  lt_ptab = o_pbox_chmod->get_properties( ).
+
+* Process based on server type
+  IF o_server_command->attrib_mode = lif_server_command=>c_attrmode_chmod.
+* CHMOD processing
+    w_chmod_to_set = '000'.
+    LOOP AT lt_ptab INTO ls_ptab.
+      CASE ls_ptab-category.
+        WHEN 'OWNER'.
+          lw_offset = 0.
+        WHEN 'GROUP'.
+          lw_offset = 1.
+        WHEN 'OTHER'.
+          lw_offset = 2.
+        WHEN OTHERS.
+          CONTINUE.
+      ENDCASE.
+
+      CASE ls_ptab-name.
+        WHEN 'READ'.
+          lw_value = 4.
+        WHEN 'WRITE'.
+          lw_value = 2.
+        WHEN 'EXE'.
+          lw_value = 1.
+        WHEN OTHERS.
+          CONTINUE.
+      ENDCASE.
+      IF ls_ptab-value NE space.
+        w_chmod_to_set+lw_offset(1) = w_chmod_to_set+lw_offset(1) + lw_value.
+      ENDIF.
+    ENDLOOP.
+
+    IF w_chmod_to_set = w_chmod_mode.
+      RETURN.
+    ENDIF.
+
+    CONCATENATE w_chmod_path w_chmod_name INTO lw_name.
+    lw_name = o_server_command->file_protect( lw_name ).
+
+    lw_string = 'Change CHMOD for file # from # to # ?'(t17).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH w_chmod_mode.
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH w_chmod_to_set.
+    PERFORM confirm_action USING lw_string 'Change'(t35) CHANGING lw_action.
+    IF lw_action = space.
+      RETURN.
+    ENDIF.
+
+    lw_params = w_chmod_to_set.
+
+    CALL METHOD o_server_command->change_attrib
+      EXPORTING
+        i_params = lw_params
+        i_file   = lw_name.
+
+  ELSEIF o_server_command->attrib_mode = lif_server_command=>c_attrmode_attrib.
+* ATTRIB processing
+    CLEAR w_attrib_to_set.
+    LOOP AT lt_ptab INTO ls_ptab
+      WHERE type = 'FLAG'
+        AND value = abap_true.
+      CONCATENATE w_attrib_to_set ls_ptab-name(1) INTO w_attrib_to_set.
+    ENDLOOP.
+
+    IF w_attrib_to_set = w_chmod_attrs.
+      RETURN.
+    ENDIF.
+
+    CLEAR lw_params.
+* Check attributes added
+    lw_attrs_check = w_attrib_to_set.
+    DO.
+      lw_att = lw_attrs_check(1).
+      IF NOT w_chmod_attrs CS lw_att.
+        CONCATENATE '+' lw_att INTO lw_att.
+        CONCATENATE lw_params lw_att INTO lw_params SEPARATED BY space.
+      ENDIF.
+      SHIFT lw_attrs_check LEFT.
+      IF sy-subrc <> 0 OR lw_att IS INITIAL.
+        EXIT.
+      ENDIF.
+    ENDDO.
+
+* Check attributes removed
+    lw_attrs_check = w_chmod_attrs.
+    DO.
+      lw_att = lw_attrs_check(1).
+      IF NOT w_attrib_to_set CS lw_att.
+        CONCATENATE '-' lw_att INTO lw_att.
+        CONCATENATE lw_params lw_att INTO lw_params SEPARATED BY space.
+      ENDIF.
+      SHIFT lw_attrs_check LEFT.
+      IF sy-subrc <> 0 OR lw_att IS INITIAL.
+        EXIT.
+      ENDIF.
+    ENDDO.
+
+    IF lw_params IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CONCATENATE w_chmod_path w_chmod_name INTO lw_name.
+    lw_name = o_server_command->file_protect( lw_name ).
+
+    lw_string = 'Change CHMOD for file # from # to # ? '(t17).
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH lw_name.
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH w_chmod_attrs.
+    REPLACE FIRST OCCURRENCE OF c_wildcard IN lw_string WITH w_attrib_to_set.
+    PERFORM confirm_action USING lw_string 'Change'(t35) CHANGING lw_action.
+    IF lw_action = space.
+      RETURN.
+    ENDIF.
+
+    CALL METHOD o_server_command->change_attrib
+      EXPORTING
+        i_params = lw_params
+        i_file   = lw_name.
+  ENDIF.
+
+  o_server_command->commit( ).
+  PERFORM change_remote_folder USING w_chmod_nodekey.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  init_auth
+*&---------------------------------------------------------------------*
+FORM init_auth.
+
+  AUTHORITY-CHECK OBJECT 'S_C_FUNCT'
+  ID 'ACTVT' FIELD '16'
+  ID 'CFUNCNAME' FIELD ' '
+  ID 'PROGRAM' FIELD 'ZAL11'.
+  IF sy-subrc NE 0.
+    CLEAR :  s_auth-zip,
+            s_auth-unzip,
+            s_auth-create_folder,
+            s_auth-move_file,
+            s_auth-move_folder,
+            s_auth-duplicate_file,
+            s_auth-duplicate_folder,
+            s_auth-rename_file,
+            s_auth-rename_folder,
+            s_auth-delete_file,
+            s_auth-delete_folder,
+            s_auth-chmod.
+  ENDIF.
+
+  IF s_customize-auth_object IS INITIAL
+  OR s_customize-auth_id IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'DL'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-download.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'UL'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-upload.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'ULOVER'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-upload.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'ZIP'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-zip.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'UNZIP'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-unzip.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FILEREN'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-rename_file.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FOLDREN'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-rename_folder.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FILEDUP'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-duplicate_file.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FOLDDUP'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-duplicate_folder.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FILEMOV'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-move_file.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FOLDMOV'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-move_folder.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FILEDEL'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-delete_file.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FOLDDEL'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-delete_folder.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'FOLDCRE'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-create_folder.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'SHORTCUT'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-shortcut.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'SHORTCRE'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-create_shortcut.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'SHORTDEL'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-delete_shortcut.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'COPYPATH'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-copy_path.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'PASTPATH'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-paste_path.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'CHMOD'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-chmod.
+  ENDIF.
+
+  AUTHORITY-CHECK OBJECT s_customize-auth_object
+  ID s_customize-auth_id FIELD 'DIRSIZE'.
+  IF sy-subrc NE 0.
+    CLEAR s_auth-dirsize.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  get_windows_special_folders
+*&---------------------------------------------------------------------*
+FORM get_windows_special_folders USING fp_folder TYPE string
+                                 CHANGING fp_path TYPE string.
+  CLEAR fp_path.
+
+  CALL METHOD cl_gui_frontend_services=>registry_get_value
+    EXPORTING
+      root                 = cl_gui_frontend_services=>hkey_current_user
+      key                  = 'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+      value                = fp_folder
+    IMPORTING
+      reg_value            = fp_path
+    EXCEPTIONS
+      get_regvalue_failed  = 1
+      cntl_error           = 2
+      error_no_gui         = 3
+      not_supported_by_gui = 4
+      OTHERS               = 5.
+  IF sy-subrc NE 0 OR fp_path IS INITIAL.
+    CALL METHOD cl_gui_frontend_services=>registry_get_value
+      EXPORTING
+        root                 = cl_gui_frontend_services=>hkey_current_user
+        key                  = 'Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders'
+        value                = fp_folder
+      IMPORTING
+        reg_value            = fp_path
+      EXCEPTIONS
+        get_regvalue_failed  = 1
+        cntl_error           = 2
+        error_no_gui         = 3
+        not_supported_by_gui = 4
+        OTHERS               = 5.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_REMOTE_FOLDER_SIZE
+*&---------------------------------------------------------------------*
+FORM get_remote_folder_size.
+  DATA lw_name TYPE string.
+
+  IF s_auth-dirsize NE abap_true.
+    MESSAGE 'You are not allowed to perform this action'(e21)
+            TYPE c_msg_success DISPLAY LIKE c_msg_error.
+    RETURN.
+  ENDIF.
+
+  LOOP AT t_details2 INTO s_detail2 WHERE dir = 1.
+    CHECK s_detail2-name NE '.. '.
+
+    CONCATENATE s_detail2-path s_detail2-name INTO lw_name.
+    lw_name = o_server_command->file_protect( lw_name ).
+    s_detail2-len = o_server_command->get_folder_size( lw_name ).
+    MODIFY t_details2 FROM s_detail2 TRANSPORTING len.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  ADD_NEW_SERVER_REMOTE
+*&---------------------------------------------------------------------*
+FORM add_new_server_remote USING pw_path TYPE c
+                                 pw_parent LIKE s_node.
+  DATA : lt_nodes_new LIKE t_nodes2,
+         lw_key(4)    TYPE n.
+
+  CLEAR s_node.
+
+  IF pw_parent IS INITIAL.
+    lw_key = 1.
+    DO.
+      CONCATENATE 'ROOT' lw_key INTO s_node-node_key.
+      READ TABLE t_nodes2 WITH KEY node_key = s_node-node_key
+                 TRANSPORTING NO FIELDS.
+      IF sy-subrc NE 0.
+        EXIT.
+      ENDIF.
+      lw_key = lw_key + 1.
+    ENDDO.
+    s_node-n_image = s_node-exp_image = '@6L@'.
+  ELSE.
+    w_node2_count = w_node2_count + 1.
+    s_node-node_key = w_node2_count.
+    s_node-relatkey = pw_parent-node_key.
+  ENDIF.
+  s_node-relatship = cl_gui_simple_tree=>relat_last_child.
+  s_node-isfolder = abap_true.
+  s_node-text = pw_path.
+  CONCATENATE pw_parent-path pw_path o_server_command->slash
+              INTO s_node-path.
+  s_node-texttosort = s_node-text.
+  TRANSLATE s_node-texttosort TO LOWER CASE.
+  s_node-dragdropid = w_handle_tree2.
+  APPEND s_node TO t_nodes2.
+  APPEND s_node TO lt_nodes_new.
+
+  CALL METHOD o_tree2->add_nodes
+    EXPORTING
+      table_structure_name = 'MTREESNODE'
+      node_table           = lt_nodes_new
+    EXCEPTIONS
+      OTHERS               = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+ENDFORM.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  ADD_REMOTE_LOGICAL_FOLDERS (continued)
+*&---------------------------------------------------------------------*
+FORM add_remote_logical_folders.
+  DATA lw_dirname TYPE dirname_al11.
+
+  DEFINE add_folder.
+    CALL 'C_SAPGPARAM' ID 'NAME'  FIELD &1
+                       ID 'VALUE' FIELD lw_dirname.
+    IF sy-subrc = 0 AND NOT lw_dirname IS INITIAL.
+      add_folder_node &2 lw_dirname.
+    ENDIF.
+  END-OF-DEFINITION.
+
+  DEFINE add_folder_node.
+    CLEAR s_node.
+    w_node2_count = w_node2_count + 1.
+    s_node-node_key = w_node2_count.
+    s_node-relatkey = 'SHORTCUT'.
+    s_node-text = &1.
+    CONCATENATE '#' &2 o_server_command->slash INTO s_node-path.
+    s_node-n_image = s_node-exp_image = '@1F@'.
+    APPEND s_node TO t_nodes2.
+  END-OF-DEFINITION.
+
+* Add new root for shortcuts
+  CLEAR s_node.
+  s_node-node_key = 'SHORTCUT'.
+  s_node-isfolder = abap_true.
+  s_node-expander = abap_true.
+  s_node-text = 'Directory Parameters'(c56).
+  s_node-path = space.
+  s_node-notreadable = abap_true.
+  s_node-n_image = s_node-exp_image = '@CQ@'.
+  APPEND s_node TO t_nodes2.
+
+  IF sy-dbsys(3) = 'ADA'.
+    add_folder 'DBROOT' 'DIR_ADA_DBROOT'.
+  ENDIF.
+
+  add_folder 'DIR_ATRA' 'DIR_ATRA'.
+  add_folder 'DIR_BINARY' 'DIR_BINARY'.
+  add_folder 'DIR_CCMS' 'DIR_CCMS'.
+  add_folder 'DIR_CT_LOGGING' 'DIR_CT_LOGGING'.
+  add_folder 'DIR_CT_RUN' 'DIR_CT_RUN'.
+  add_folder 'DIR_DATA' 'DIR_DATA'.
+  IF sy-dbsys(3) = 'DB6'.
+    add_folder 'INSTHOME' 'DIR_DB2_HOME'.
+  ENDIF.
+  add_folder 'DIR_DBMS' 'DIR_DBMS'.
+  add_folder 'DIR_EXECUTABLE' 'DIR_EXECUTABLE'.
+  add_folder 'DIR_EXE_ROOT' 'DIR_EXE_ROOT'.
+  add_folder 'DIR_GEN' 'DIR_GEN'.
+  add_folder 'DIR_GEN_ROOT' 'DIR_GEN_ROOT'.
+  add_folder 'DIR_GLOBAL' 'DIR_GLOBAL'.
+  add_folder 'DIR_GRAPH_EXE' 'DIR_GRAPH_EXE'.
+  add_folder 'DIR_GRAPH_LIB' 'DIR_GRAPH_LIB'.
+  add_folder 'DIR_HOME' 'DIR_HOME'.
+  IF sy-dbsys(3) = 'INF'.
+    add_folder 'INFORMIXDIR' 'DIR_INF_INFORMIXDIR'.
+  ENDIF.
+  add_folder 'DIR_INSTALL' 'DIR_INSTALL'.
+  add_folder 'DIR_INSTANCE' 'DIR_INSTANCE'.
+  add_folder 'DIR_LIBRARY' 'DIR_LIBRARY'.
+  add_folder 'DIR_LOGGING' 'DIR_LOGGING'.
+  add_folder 'DIR_MEMORY_INSPECTOR' 'DIR_MEMORY_INSPECTOR'.
+  IF sy-dbsys(3) = 'ORA'.
+    add_folder 'DIR_ORAHOME' 'DIR_ORAHOME'.
+  ENDIF.
+  add_folder 'DIR_PAGING' 'DIR_PAGING'.
+  add_folder 'DIR_PUT' 'DIR_PUT'.
+  add_folder 'DIR_PERF' 'DIR_PERF'.
+  add_folder 'DIR_PROFILE' 'DIR_PROFILE'.
+  add_folder 'DIR_PROTOKOLLS' 'DIR_PROTOKOLLS'.
+  add_folder 'DIR_REORG' 'DIR_REORG'.
+  add_folder 'DIR_ROLL' 'DIR_ROLL'.
+  add_folder 'DIR_RSYN' 'DIR_RSYN'.
+
+* Calculate directory for saphostagent
+  IF ( sy-opsys(3) = 'WIN' ) OR ( sy-opsys(3) = 'Win' ).
+    CALL 'C_GETENV' ID 'NAME'  FIELD 'ProgramFiles'
+                    ID 'VALUE' FIELD lw_dirname.
+    IF lw_dirname IS INITIAL.
+      CALL 'C_GETENV' ID 'NAME'  FIELD 'windir'
+                      ID 'VALUE' FIELD lw_dirname.
+      lw_dirname+3 = 'Program Files'.
+    ENDIF.
+    CONCATENATE lw_dirname '\SAP\hostctrl' INTO lw_dirname.
+  ELSE.
+    lw_dirname = '/usr/sap/hostctrl'.
+  ENDIF.
+  add_folder_node 'DIR_SAPHOSTAGENT' lw_dirname.
+
+  add_folder 'DIR_SETUPS' 'DIR_SETUPS'.
+  add_folder 'DIR_SORTTMP' 'DIR_SORTTMP'.
+  add_folder 'DIR_SOURCE' 'DIR_SOURCE'.
+  add_folder 'DIR_TEMP' 'DIR_TEMP'.
+  add_folder 'DIR_TRANS' 'DIR_TRANS'.
+  add_folder 'DIR_TRFILES' 'DIR_TRFILES'.
+  add_folder 'DIR_TRSUB' 'DIR_TRSUB'.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  MANAGE_SERVER_LINK
+*&---------------------------------------------------------------------*
+FORM manage_server_link USING pw_path TYPE c.
+  DATA : lw_key         TYPE indx-srtfd,
+         ls_server_link LIKE LINE OF t_server_link.
+
+  READ TABLE t_server_link TRANSPORTING NO FIELDS WITH KEY low = pw_path.
+  IF sy-subrc = 0.
+    DELETE t_server_link INDEX sy-tabix.
+  ELSE.
+    CLEAR ls_server_link.
+    ls_server_link-selname = 'SERVER'.
+    ls_server_link-kind = 'S'.
+    ls_server_link-sign = 'I'.
+    ls_server_link-option = 'EQ'.
+    ls_server_link-low = pw_path.
+    APPEND ls_server_link TO t_server_link.
+  ENDIF.
+
+  CONCATENATE 'ZAL11' sy-uname INTO lw_key.
+  EXPORT t_server_link FROM t_server_link
+         TO DATABASE indx(za) ID lw_key.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SERVER_LINK
+*&---------------------------------------------------------------------*
+FORM get_server_link.
+  DATA : lw_key         TYPE indx-srtfd,
+         ls_server_link LIKE LINE OF t_server_link.
+
+  CONCATENATE 'ZAL11' sy-uname INTO lw_key.
+  IMPORT t_server_link TO t_server_link
+         FROM DATABASE indx(za) ID lw_key.
+
+  LOOP AT t_server_link INTO ls_server_link.
+    PERFORM goto_shortcut USING ls_server_link-low 2 abap_true.
+  ENDLOOP.
+ENDFORM.
