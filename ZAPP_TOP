@@ -1,0 +1,403 @@
+*&---------------------------------------------------------------------*
+*& Include          ZAPP_TOP
+*&---------------------------------------------------------------------*
+
+*######################################################################*
+*
+*                        CUSTOMIZATION SECTION
+*
+*######################################################################*
+
+TYPE-POOLS abap.
+
+DATA : BEGIN OF s_customize,
+         root_path(600)  TYPE c VALUE '',
+         root_name(20)   TYPE c VALUE '',
+         autodirsize(1)  TYPE c VALUE space,
+         logical_path(1) TYPE c VALUE abap_true,
+         total_on_top(1) TYPE c VALUE abap_true,
+         confirm_dl(1)   TYPE c VALUE abap_true,
+         auth_object(20) TYPE c VALUE '',
+         auth_id(10)     TYPE c VALUE '',
+         root_path_len   TYPE i VALUE 0,
+       END OF s_customize,
+
+       BEGIN OF s_auth,
+         download(1)         TYPE c VALUE abap_true,
+         upload(1)           TYPE c VALUE abap_true,
+         overwrite(1)        TYPE c VALUE abap_true,
+         zip(1)              TYPE c VALUE abap_true,
+         unzip(1)            TYPE c VALUE abap_true,
+         rename_file(1)      TYPE c VALUE abap_true,
+         rename_folder(1)    TYPE c VALUE abap_true,
+         duplicate_file(1)   TYPE c VALUE abap_true,
+         duplicate_folder(1) TYPE c VALUE abap_true,
+         move_file(1)        TYPE c VALUE abap_true,
+         move_folder(1)      TYPE c VALUE abap_true,
+         delete_file(1)      TYPE c VALUE abap_true,
+         delete_folder(1)    TYPE c VALUE abap_true,
+         create_folder(1)    TYPE c VALUE abap_true,
+         shortcut(1)         TYPE c VALUE abap_true,
+         create_shortcut(1)  TYPE c VALUE abap_true,
+         delete_shortcut(1)  TYPE c VALUE abap_true,
+         copy_path(1)        TYPE c VALUE abap_true,
+         paste_path(1)       TYPE c VALUE abap_true,
+         chmod(1)            TYPE c VALUE abap_true,
+         dirsize(1)          TYPE c VALUE abap_true,
+       END OF s_auth.
+
+*######################################################################*
+*
+*                             DATA SECTION
+*
+*######################################################################*
+CLASS lcl_application DEFINITION DEFERRED.
+INTERFACE lif_server_command DEFERRED.
+
+* Objects
+DATA : o_docking_container TYPE REF TO cl_gui_docking_container,
+       o_splitter          TYPE REF TO cl_gui_splitter_container,
+       o_splitter_h        TYPE REF TO cl_gui_splitter_container,
+       o_splitter_l        TYPE REF TO cl_gui_splitter_container,
+       o_container_h       TYPE REF TO cl_gui_container,
+       o_container_l       TYPE REF TO cl_gui_container,
+       o_container_tree1   TYPE REF TO cl_gui_container,
+       o_container_tree2   TYPE REF TO cl_gui_container,
+       o_container_detail1 TYPE REF TO cl_gui_container,
+       o_container_detail2 TYPE REF TO cl_gui_container,
+       o_tree1             TYPE REF TO cl_gui_simple_tree,
+       o_tree2             TYPE REF TO cl_gui_simple_tree,
+       o_grid1             TYPE REF TO cl_gui_alv_grid,
+       o_grid2             TYPE REF TO cl_gui_alv_grid,
+       o_dragdrop_grid1    TYPE REF TO cl_dragdrop,
+       o_dragdrop_grid2    TYPE REF TO cl_dragdrop,
+       o_dragdrop_tree1    TYPE REF TO cl_dragdrop,
+       o_dragdrop_tree2    TYPE REF TO cl_dragdrop,
+       o_handle_event      TYPE REF TO lcl_application,
+       o_dialog_chmod      TYPE REF TO cl_gui_dialogbox_container,
+       o_pbox_chmod        TYPE REF TO cl_wdy_wb_property_box,
+       o_server_command    TYPE REF TO lif_server_command.
+
+* List of local drives
+DATA : BEGIN OF s_drive,
+         drive(300) TYPE c,
+         type(20)   TYPE c,
+         desc(300)  TYPE c,
+       END OF s_drive,
+       t_drives LIKE STANDARD TABLE OF s_drive,
+
+* Node structure
+       BEGIN OF s_node.
+         INCLUDE STRUCTURE mtreesnode.
+DATA : path(600)      TYPE c,
+         read(1)        TYPE c,
+         notreadable(1) TYPE c,
+         texttosort     TYPE mtreesnode-text,
+       END OF s_node,
+
+* Node tables
+       t_nodes1 LIKE STANDARD TABLE OF s_node,
+       t_nodes2 LIKE STANDARD TABLE OF s_node,
+
+* Local Grid structure
+       BEGIN OF s_detail1,
+         icon(4)             TYPE c,
+         path(600)           TYPE c,
+         name(1024)          TYPE c,
+         dir                 TYPE i,
+         filetype(20)        TYPE c,
+         len                 TYPE file_info-filelength,
+         cdate               TYPE dats,
+         ctime               TYPE tims,
+         mdate               TYPE dats,
+         mtime               TYPE tims,
+         rdate               TYPE dats,
+         rtime               TYPE tims,
+         attrs(10)           TYPE c,
+         filetransfermode(3) TYPE c,
+       END OF s_detail1,
+
+* Remote grid structure
+       BEGIN OF s_detail2,
+         icon(4)             TYPE c,
+         path(600)           TYPE c,
+         name(1024)          TYPE c,
+         dir                 TYPE i,
+         filetype(20)        TYPE c,
+         len(16)             TYPE p,
+         mdate               TYPE dats,
+         mtime               TYPE tims,
+         mode(9)             TYPE c,
+         attrs(10)           TYPE c,
+         owner(8)            TYPE c,
+         filetransfermode(3) TYPE c,
+       END OF s_detail2,
+
+* Grid tables
+       t_details1 LIKE STANDARD TABLE OF s_detail1,
+       t_details2 LIKE STANDARD TABLE OF s_detail2,
+
+* Server shortcuts
+       BEGIN OF s_shortcut,
+         dirname TYPE user_dir-dirname,
+         aliass  TYPE user_dir-aliass,
+         selkz   TYPE c,
+       END OF s_shortcut,
+       t_shortcuts               LIKE TABLE OF s_shortcut,
+
+* Node key unique counter
+       w_node1_count(12)         TYPE n,
+       w_node2_count(12)         TYPE n,
+
+* ALV config tables and structures
+       t_fieldcat_grid1          TYPE lvc_t_fcat,
+       t_sort_grid1              TYPE lvc_t_sort,
+       s_layout_grid1            TYPE lvc_s_layo,
+       t_fieldcat_grid2          TYPE lvc_t_fcat,
+       t_sort_grid2              TYPE lvc_t_sort,
+       s_layout_grid2            TYPE lvc_s_layo,
+
+* Shared memory variable name
+       w_shared_dir_local(30)    TYPE c,
+       w_shared_dir_remote(30)   TYPE c,
+       w_path                    LIKE s_node-path,
+
+* CHMOD data
+       w_chmod_to_set            LIKE s_detail2-mode,
+       w_owner_to_set            LIKE s_detail2-owner,
+       w_attrib_to_set           LIKE s_detail2-attrs,
+       w_chmod_ok                TYPE abap_bool,
+       w_chmod_path              LIKE s_detail2-path,
+       w_chmod_name              LIKE s_detail2-name,
+       w_chmod_mode              LIKE s_detail2-mode,
+       w_chmod_owner             LIKE s_detail2-owner,
+       w_chmod_attrs             LIKE s_detail2-attrs,
+       w_chmod_nodekey           TYPE tv_nodekey,
+
+* Other global data
+       w_force_transfer_mode(10) TYPE c,
+       w_server_name(20)         TYPE c,
+       w_handle_grid1            TYPE i,
+       w_handle_grid2            TYPE i,
+       w_handle_tree1            TYPE i,
+       w_handle_tree2            TYPE i,
+
+* List of distant server to display at start
+       t_server_link             TYPE TABLE OF rsparams.
+
+* Constants
+CONSTANTS : c_drivetype_hdd       LIKE s_drive-type VALUE 'FIXED',
+            c_drivetype_cd        LIKE s_drive-type VALUE 'CDROM',
+            c_drivetype_remote    LIKE s_drive-type VALUE 'REMOTE',
+            c_drivetype_usb       LIKE s_drive-type VALUE 'REMOVEABLE',
+            c_asc                 LIKE s_detail1-filetransfermode VALUE 'ASC',
+            c_bin                 LIKE s_detail1-filetransfermode VALUE 'BIN',
+            c_drivetypewin_usb    LIKE s_drive-type VALUE '2',
+            c_drivetypewin_hdd    LIKE s_drive-type VALUE '3',
+            c_drivetypewin_cd     LIKE s_drive-type VALUE '5',
+            c_drivetypewin_remote LIKE s_drive-type VALUE '4',
+            c_wildcard(1)         TYPE c VALUE '#',
+            c_local_slash(1)      TYPE c VALUE '\',
+            c_goto_parent_dir(2)  TYPE c VALUE '..',
+            c_msg_error(1)        TYPE c VALUE 'E',
+            c_msg_success(1)      TYPE c VALUE 'S',
+            c_server_all          TYPE user_dir-svrname VALUE 'all',
+            c_open_no(1)          TYPE c VALUE space,
+            c_open_yes(1)         TYPE c VALUE 'X',
+            c_open_as(1)          TYPE c VALUE 'A'.
+
+*######################################################################*
+*
+*                             MACRO SECTION
+*
+*######################################################################*
+
+DEFINE find_last_occurrence.
+  FIND ALL OCCURRENCES OF &1 IN &2 MATCH OFFSET &3.
+END-OF-DEFINITION.
+
+*######################################################################*
+*
+*                             CLASS SECTION
+*
+*######################################################################*
+
+*----------------------------------------------------------------------*
+*       INTERFACE lif_server_command
+*----------------------------------------------------------------------*
+INTERFACE lif_server_command.
+  DATA : slash(1)             TYPE c,
+         last_command(1000)   TYPE c,
+         attrib_mode          TYPE i,
+         root_not_readable(1) TYPE c.
+  CONSTANTS : c_copymode_file   TYPE i VALUE 1,
+              c_copymode_folder TYPE i VALUE 2,
+              c_attrmode_none   TYPE i VALUE 0,
+              c_attrmode_chmod  TYPE i VALUE 1,
+              c_attrmode_attrib TYPE i VALUE 2.
+  METHODS : create_folder IMPORTING i_newfolder TYPE string
+                          EXPORTING e_subrc     TYPE i,
+    copy          IMPORTING i_source TYPE string
+                            i_target TYPE string
+                            i_mode   TYPE i
+                  EXPORTING e_subrc  TYPE i,
+    delete        IMPORTING i_source TYPE string
+                            i_mode   TYPE i
+                  EXPORTING e_subrc  TYPE i,
+    move          IMPORTING i_source TYPE string
+                            i_target TYPE string
+                  EXPORTING e_subrc  TYPE i,
+    rename        IMPORTING i_source TYPE string
+                            i_target TYPE string
+                  EXPORTING e_subrc  TYPE i,
+    change_attrib IMPORTING i_file   TYPE string
+                            i_params TYPE string
+                  EXPORTING e_subrc  TYPE i,
+    compress      IMPORTING i_file  TYPE string
+                  EXPORTING e_subrc TYPE i,
+    uncompress    IMPORTING i_file  TYPE string
+                            i_path  TYPE string
+                  EXPORTING e_subrc TYPE i,
+    get_attrib    IMPORTING i_file   TYPE string
+                  EXPORTING e_attrib TYPE string,
+    file_protect  IMPORTING i_file        TYPE string
+                  RETURNING VALUE(e_file) TYPE string,
+    drive_list    EXPORTING e_drive_table LIKE t_drives,
+    commit,
+    get_folder_size IMPORTING i_file        TYPE string
+                    RETURNING VALUE(e_size) LIKE s_detail2-len.
+ENDINTERFACE.
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_aix_server DEFINITION
+*----------------------------------------------------------------------*
+CLASS lcl_aix_server DEFINITION FINAL.
+  PUBLIC SECTION.
+    INTERFACES lif_server_command DATA VALUES slash = '/'
+      attrib_mode = lif_server_command=>c_attrmode_chmod
+      root_not_readable = space.
+
+    ALIASES:  create_folder FOR lif_server_command~create_folder,
+             copy FOR lif_server_command~copy,
+             delete FOR lif_server_command~delete,
+             move  FOR lif_server_command~move,
+             rename FOR lif_server_command~rename,
+             change_attrib FOR lif_server_command~change_attrib,
+             compress FOR lif_server_command~compress,
+             uncompress FOR lif_server_command~uncompress,
+             get_attrib FOR lif_server_command~get_attrib,
+             file_protect FOR lif_server_command~file_protect,
+             drive_list FOR lif_server_command~drive_list,
+             commit FOR lif_server_command~commit,
+             get_folder_size FOR lif_server_command~get_folder_size,
+             slash FOR lif_server_command~slash,
+             last_command FOR lif_server_command~last_command,
+             root_not_readable FOR lif_server_command~root_not_readable.
+ENDCLASS.
+
+
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_windows_server DEFINITION
+*----------------------------------------------------------------------*
+CLASS lcl_windows_server DEFINITION FINAL.
+  PUBLIC SECTION.
+    INTERFACES lif_server_command DATA VALUES slash = '\'
+      attrib_mode = lif_server_command=>c_attrmode_attrib
+      root_not_readable = abap_true.
+    ALIASES: create_folder FOR lif_server_command~create_folder,
+             copy FOR lif_server_command~copy,
+             delete FOR lif_server_command~delete,
+             move  FOR lif_server_command~move,
+             rename FOR lif_server_command~rename,
+             change_attrib FOR lif_server_command~change_attrib,
+             compress FOR lif_server_command~compress,
+             uncompress FOR lif_server_command~uncompress,
+             get_attrib FOR lif_server_command~get_attrib,
+             file_protect FOR lif_server_command~file_protect,
+             drive_list FOR lif_server_command~drive_list,
+             commit FOR lif_server_command~commit,
+             get_folder_size FOR lif_server_command~get_folder_size,
+             slash FOR lif_server_command~slash,
+             last_command FOR lif_server_command~last_command,
+             root_not_readable FOR lif_server_command~root_not_readable.
+ENDCLASS.
+
+
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_application DEFINITION
+*----------------------------------------------------------------------*
+CLASS lcl_application DEFINITION FINAL.
+  PUBLIC SECTION.
+    METHODS:
+      handle_select
+        FOR EVENT selection_changed
+        OF cl_gui_simple_tree
+        IMPORTING node_key,
+      handle_select_remote
+        FOR EVENT selection_changed
+        OF cl_gui_simple_tree
+        IMPORTING node_key,
+      handle_grid_double_click
+        FOR EVENT double_click
+        OF cl_gui_alv_grid
+        IMPORTING es_row_no,
+      handle_grid_double_click_remot
+        FOR EVENT double_click
+        OF cl_gui_alv_grid
+        IMPORTING es_row_no,
+      handle_grid_context_local
+        FOR EVENT context_menu_request
+        OF cl_gui_alv_grid
+        IMPORTING e_object,
+      handle_grid_context
+        FOR EVENT context_menu_request
+        OF cl_gui_alv_grid
+        IMPORTING e_object,
+      handle_toolbar
+        FOR EVENT toolbar
+        OF cl_gui_alv_grid
+        IMPORTING e_object,
+      handle_menu_button
+        FOR EVENT menu_button
+        OF cl_gui_alv_grid
+        IMPORTING e_object e_ucomm,
+      handle_user_command
+        FOR EVENT user_command
+        OF cl_gui_alv_grid
+        IMPORTING e_ucomm,
+      handle_grid_drag
+        FOR EVENT ondrag
+        OF cl_gui_alv_grid
+        IMPORTING e_row e_dragdropobj,
+      handle_local_grid_drop
+        FOR EVENT ondrop
+        OF cl_gui_alv_grid
+        IMPORTING e_row e_dragdropobj,
+      handle_remote_grid_drop
+        FOR EVENT ondrop
+        OF cl_gui_alv_grid
+        IMPORTING e_row e_dragdropobj,
+      handle_local_tree_drop
+        FOR EVENT on_drop
+        OF cl_gui_simple_tree
+        IMPORTING node_key drag_drop_object,
+      handle_remote_tree_drop
+        FOR EVENT on_drop
+        OF cl_gui_simple_tree
+        IMPORTING node_key drag_drop_object,
+* New handlers for dialog box
+      handle_chmod_ok
+        FOR EVENT close
+        OF cl_gui_dialogbox_container
+        IMPORTING sender,
+      handle_chmod_cancel
+        FOR EVENT close
+        OF cl_gui_dialogbox_container
+        IMPORTING sender.
+
+  PRIVATE SECTION.
+    DATA : lw_drag_handle TYPE i,
+           lw_drag_rowid  TYPE i.
+ENDCLASS.
