@@ -1,0 +1,1521 @@
+*&---------------------------------------------------------------------*
+*& Include          ZAPP_CLS
+*&---------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_aix_server IMPLEMENTATION
+*----------------------------------------------------------------------*
+CLASS lcl_aix_server IMPLEMENTATION.
+  METHOD create_folder.
+    CONCATENATE 'mkdir' i_newfolder INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD copy.
+    CONCATENATE 'cp -r' i_source i_target INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD delete.
+    CASE i_mode.
+      WHEN lif_server_command~c_copymode_file.
+        CONCATENATE 'rm' i_source INTO last_command
+                    SEPARATED BY space.
+      WHEN lif_server_command~c_copymode_folder.
+        CONCATENATE 'rm -R' i_source INTO last_command
+                    SEPARATED BY space.
+    ENDCASE.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD move.
+    CONCATENATE 'mv' i_source i_target INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD rename.
+    CONCATENATE 'mv' i_source i_target INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD change_attrib.
+    CONCATENATE 'chmod' i_params i_file INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD compress.
+    DATA : lw_file_to   TYPE string,
+           lw_file_from TYPE string.
+
+    CONCATENATE i_file '. tar. bz2' INTO lw_file_to.
+    lw_file_to = file_protect( lw_file_to ).
+
+    CONCATENATE 'rm' lw_file_to INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    commit( ).
+
+    lw_file_from = file_protect( i_file ).
+    CONCATENATE i_file '.tar' INTO lw_file_to.
+    lw_file_to = file_protect( lw_file_to ).
+    CONCATENATE 'tar cf' lw_file_to lw_file_from
+                INTO last_command SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    commit( ).
+
+    CONCATENATE 'bzip2 -9' lw_file_to INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD uncompress.
+    DATA : lw_pos       TYPE i,
+           lw_extension TYPE string,
+           lw_file      TYPE string,
+           lw_path      TYPE string.
+    CLEAR e_subrc.
+
+    find_last_occurrence '.' i_file lw_pos.
+    IF sy-subrc NE 0.
+      e_subrc = 1.
+      RETURN.
+    ENDIF.
+    lw_extension = i_file+lw_pos.
+    TRANSLATE lw_extension TO LOWER CASE.
+
+    CONCATENATE i_path i_file INTO lw_file.
+    lw_file = file_protect( lw_file ).
+    lw_path = file_protect( i_path ).
+
+    IF lw_extension = '.bz2'.
+      CONCATENATE 'bunzip2' lw_file INTO last_command
+                  SEPARATED BY space.
+      CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+      e_subrc = sy-subrc.
+      lw_file = i_file(lw_pos).
+      find_last_occurrence '.' lw_file lw_pos.
+      IF sy-subrc = 0.
+        lw_extension = lw_file+lw_pos.
+        TRANSLATE lw_extension TO LOWER CASE.
+        CONCATENATE i_path lw_file INTO lw_file.
+        lw_file = file_protect( lw_file ).
+        commit( ).
+      ELSE.
+        CLEAR lw_extension.
+      ENDIF.
+    ENDIF.
+
+    IF lw_extension = '. gz'.
+      CONCATENATE 'gunzip' lw_file INTO last_command
+                  SEPARATED BY space.
+      CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+      e_subrc = sy-subrc.
+      lw_file = i_file(lw_pos).
+      find_last_occurrence '.' lw_file lw_pos.
+      IF sy-subrc = 0.
+        lw_extension = lw_file+lw_pos.
+        TRANSLATE lw_extension TO LOWER CASE.
+        CONCATENATE i_path lw_file INTO lw_file.
+        lw_file = file_protect( lw_file ).
+        commit( ).
+      ELSE.
+        CLEAR lw_extension.
+      ENDIF.
+    ENDIF.
+
+    IF lw_extension = '.tar'.
+      CONCATENATE 'tar xf' lw_file INTO last_command
+                  SEPARATED BY space.
+      CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+      e_subrc = sy-subrc.
+    ENDIF.
+
+    IF lw_extension = '.zip'.
+      CONCATENATE 'unzip' lw_file '-d' lw_path
+                  INTO last_command SEPARATED BY space.
+      CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+      e_subrc = sy-subrc.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_attrib.
+    CLEAR e_attrib.
+  ENDMETHOD.
+
+  METHOD drive_list.
+    REFRESH e_drive_table.
+  ENDMETHOD.
+
+  METHOD file_protect.
+    IF i_file IS NOT INITIAL AND i_file(1) NE '"'.
+      CONCATENATE '"' i_file '"' INTO e_file.
+    ELSE.
+      e_file = i_file.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD commit.
+    WAIT UP TO 1 SECONDS.
+  ENDMETHOD.
+
+  METHOD get_folder_size.
+    DATA : lw_line(150) TYPE c,
+           lt_tab       LIKE TABLE OF lw_line,
+           lw_size      TYPE string,
+           lw_dummy     TYPE string.
+
+    CLEAR e_size.
+    CONCATENATE 'du -sk' i_file INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command
+                  ID 'TAB'     FIELD lt_tab.
+    READ TABLE lt_tab INTO lw_line INDEX 1.
+    IF sy-subrc = 0.
+      SPLIT lw_line AT cl_abap_char_utilities=>horizontal_tab
+            INTO lw_size lw_dummy.
+      e_size = lw_size * 1000.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+
+*----------------------------------------------------------------------*
+*       CLASS LCL_APPLICATION IMPLEMENTATION
+*----------------------------------------------------------------------*
+CLASS lcl_application IMPLEMENTATION.
+
+  METHOD handle_local_tree_drop.
+    DATA : ls_detail2 LIKE s_detail2,
+           ls_node    LIKE s_node.
+
+    IF lw_drag_handle = w_handle_grid2.
+      READ TABLE t_details2 INTO ls_detail2 INDEX lw_drag_rowid.
+      IF ls_detail2-dir = 1 OR sy-subrc NE 0.
+        MESSAGE 'Please choose a remote file to download'(e01)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        CALL METHOD drag_drop_object->abort.
+        RETURN.
+      ENDIF.
+
+      READ TABLE t_nodes1 INTO ls_node WITH KEY node_key = node_key.
+      IF sy-subrc NE 0.
+        MESSAGE 'Cannot find target.. .'(e02) TYPE c_msg_success
+                 DISPLAY LIKE c_msg_error.
+        CALL METHOD drag_drop_object->abort.
+        RETURN.
+      ENDIF.
+
+      PERFORM save_remote_to_local USING ls_detail2-path
+                                         ls_detail2-name
+                                         ls_node-path
+                                         ls_detail2-name
+                                         ls_detail2-filetransfermode
+                                         c_open_no.
+
+      CALL METHOD o_tree1->set_selected_node
+        EXPORTING
+          node_key = node_key.
+      PERFORM change_local_folder USING node_key.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_remote_tree_drop.
+    DATA : ls_node    LIKE s_node,
+           ls_detail1 LIKE s_detail1,
+           ls_detail2 LIKE s_detail2,
+           lw_name    LIKE s_detail2-name.
+
+    IF drag_drop_object->dragsourcectrl = o_grid1.
+      READ TABLE t_details1 INTO ls_detail1 INDEX lw_drag_rowid.
+      IF ls_detail1-dir = 1 OR sy-subrc NE 0.
+        MESSAGE 'Please choose a local file to upload'(e03)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        CALL METHOD drag_drop_object->abort.
+        RETURN.
+      ENDIF.
+      READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = node_key.
+      IF sy-subrc NE 0 OR ls_node-notreadable NE space.
+        MESSAGE 'Cannot find target...'(e02) TYPE c_msg_success
+                 DISPLAY LIKE c_msg_error.
+        CALL METHOD drag_drop_object->abort.
+        RETURN.
+      ENDIF.
+      PERFORM save_local_to_remote USING ls_detail1-path
+                                         ls_detail1-name
+                                         ls_node-path
+                                         ls_detail1-name
+                                         ls_detail1-filetransfermode.
+      CALL METHOD o_tree2->set_selected_node
+        EXPORTING
+          node_key = node_key.
+      PERFORM change_remote_folder USING node_key.
+
+    ELSEIF drag_drop_object->dragsourcectrl = o_grid2.
+      READ TABLE t_details2 INTO ls_detail2 INDEX lw_drag_rowid.
+      IF sy-subrc NE 0 OR ls_detail2-name = c_goto_parent_dir.
+        MESSAGE 'Please choose a local file/folder to upload'(e20)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        CALL METHOD drag_drop_object->abort.
+        RETURN.
+      ENDIF.
+
+      READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = node_key.
+      IF sy-subrc NE 0 OR ls_node-notreadable NE space.
+        MESSAGE 'Cannot find target.. .'(e02) TYPE c_msg_success
+                 DISPLAY LIKE c_msg_error.
+        CALL METHOD drag_drop_object->abort.
+        RETURN.
+      ENDIF.
+
+      IF ls_node-path = ls_detail2-path.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM duplicate_item USING lw_name ls_detail2-dir.
+        IF ls_detail2-dir = 1.
+          PERFORM refresh_tree2 USING ls_node.
+        ELSE.
+          PERFORM get_remote_folder_detail USING ls_detail2-path.
+          PERFORM refresh_grid_display USING 2.
+        ENDIF.
+      ELSE.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM copy_item USING lw_name
+                                ls_node-path
+                                drag_drop_object->effect
+                                ls_detail2-dir.
+        IF ls_detail2-dir = 1.
+          READ TABLE t_nodes2 INTO ls_node WITH KEY path = ls_detail2-path.
+          PERFORM refresh_tree2 USING ls_node.
+          READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = node_key.
+          IF sy-subrc = 0.
+            PERFORM refresh_tree2 USING ls_node.
+          ENDIF.
+        ELSE.
+          PERFORM get_remote_folder_detail USING ls_detail2-path.
+          PERFORM refresh_grid_display USING 2.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_grid_drag.
+    IF e_dragdropobj->dragsourcectrl = o_grid1.
+      lw_drag_handle = w_handle_grid1.
+      e_dragdropobj->object = o_grid1.
+    ENDIF.
+    IF e_dragdropobj->dragsourcectrl = o_grid2.
+      lw_drag_handle = w_handle_grid2.
+      e_dragdropobj->object = o_grid2.
+    ENDIF.
+    lw_drag_rowid = e_row-index.
+  ENDMETHOD.
+
+  METHOD handle_remote_grid_drop.
+    DATA : ls_detail1     LIKE s_detail1,
+           ls_detail2     LIKE s_detail2,
+           ls_detail2_bis LIKE s_detail2,
+           ls_node        LIKE s_node,
+           lw_index       TYPE i,
+           lw_name        LIKE s_detail1-path.
+
+    IF lw_drag_handle = w_handle_grid1.
+      READ TABLE t_details1 INTO ls_detail1 INDEX lw_drag_rowid.
+      IF ls_detail1-dir = 1 OR sy-subrc NE 0.
+        MESSAGE 'Please choose a local file to upload'(e03)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        CALL METHOD e_dragdropobj->abort.
+        RETURN.
+      ENDIF.
+      IF e_row-index IS INITIAL.
+        READ TABLE t_details2 INTO ls_detail2 INDEX 1.
+      ELSE.
+        READ TABLE t_details2 INTO ls_detail2 INDEX e_row-index.
+      ENDIF.
+      IF sy-subrc NE 0.
+        MESSAGE 'Cannot find target...'(e02) TYPE c_msg_success
+                 DISPLAY LIKE c_msg_error.
+        CALL METHOD e_dragdropobj->abort.
+        RETURN.
+      ENDIF.
+      IF ls_detail2-dir = 1 AND ls_detail2-name NE c_goto_parent_dir.
+        CONCATENATE ls_detail2-path ls_detail2-name o_server_command->slash
+                    INTO ls_detail2-path.
+      ENDIF.
+      PERFORM save_local_to_remote USING ls_detail1-path
+                                         ls_detail1-name
+                                         ls_detail2-path
+                                         ls_detail1-name
+                                         ls_detail1-filetransfermode.
+      IF ls_detail2-dir = 1 AND ls_detail2-name NE c_goto_parent_dir.
+        READ TABLE t_nodes2 INTO s_node
+                   WITH KEY path = ls_detail2-path.
+        CALL METHOD o_tree2->set_selected_node
+          EXPORTING
+            node_key = s_node-node_key.
+        PERFORM change_remote_folder USING s_node-node_key.
+      ELSE.
+        PERFORM get_remote_folder_detail USING ls_detail2-path.
+        PERFORM refresh_grid_display USING 2.
+      ENDIF.
+
+    ELSE.
+      READ TABLE t_details2 INTO ls_detail2 INDEX lw_drag_rowid.
+      IF sy-subrc NE 0 OR ls_detail2-name = c_goto_parent_dir.
+        MESSAGE 'Please choose a local file/folder to upload'(e20)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        CALL METHOD e_dragdropobj->abort.
+        RETURN.
+      ENDIF.
+      IF e_row-index IS INITIAL.
+        READ TABLE t_details2 INTO ls_detail2_bis INDEX 1.
+      ELSE.
+        READ TABLE t_details2 INTO ls_detail2_bis INDEX e_row-index.
+      ENDIF.
+      IF sy-subrc NE 0.
+        MESSAGE 'Cannot find target...'(e02) TYPE c_msg_success
+                 DISPLAY LIKE c_msg_error.
+        CALL METHOD e_dragdropobj->abort.
+        RETURN.
+      ENDIF.
+      IF ls_detail2_bis-name = c_goto_parent_dir
+      AND NOT e_row-index IS INITIAL.
+        lw_index = strlen( ls_detail2_bis-path ).
+        lw_index = lw_index - 1.
+        IF ls_detail2_bis-path+lw_index(1) = o_server_command->slash.
+          ls_detail2_bis-path = ls_detail2_bis-path(lw_index).
+        ENDIF.
+        find_last_occurrence o_server_command->slash ls_detail2_bis-path
+                             lw_index.
+        IF sy-subrc NE 0 OR
+        ( lw_index = 0 AND ls_detail2_bis-path(1) NE o_server_command->slash ).
+          MESSAGE 'Error when calculate target.. .'(e04)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+          CALL METHOD e_dragdropobj->abort.
+          RETURN.
+        ENDIF.
+        lw_index = lw_index + 1.
+        ls_detail2_bis-path = ls_detail2_bis-path(lw_index).
+
+      ELSEIF ls_detail2_bis-dir = 1
+      AND ls_detail2_bis-name NE c_goto_parent_dir.
+        CONCATENATE ls_detail2_bis-path ls_detail2_bis-name
+                    o_server_command->slash INTO ls_detail2_bis-path.
+      ENDIF.
+
+      IF ls_detail2_bis-path = ls_detail2-path.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM duplicate_item USING lw_name ls_detail2-dir.
+        IF ls_detail2-dir = 1.
+          READ TABLE t_nodes2 INTO ls_node
+                     WITH KEY path = ls_detail2-path.
+          PERFORM refresh_tree2 USING ls_node.
+        ELSE.
+          PERFORM get_remote_folder_detail USING ls_detail2-path.
+          PERFORM refresh_grid_display USING 2.
+        ENDIF.
+      ELSE.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM copy_item USING lw_name
+                                ls_detail2_bis-path
+                                e_dragdropobj->effect
+                                ls_detail2-dir.
+        IF ls_detail2-dir = 1.
+          IF ls_detail2_bis-name = c_goto_parent_dir
+          AND NOT e_row-index IS INITIAL.
+            READ TABLE t_nodes2 INTO ls_node
+                       WITH KEY path = ls_detail2_bis-path.
+          ELSE.
+            READ TABLE t_nodes2 INTO ls_node
+                       WITH KEY path = ls_detail2-path.
+          ENDIF.
+          PERFORM refresh_tree2 USING ls_node.
+        ELSE.
+          PERFORM get_remote_folder_detail USING ls_detail2-path.
+          PERFORM refresh_grid_display USING 2.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_local_grid_drop.
+    DATA : ls_detail1 LIKE s_detail1,
+           ls_detail2 LIKE s_detail2.
+
+    IF lw_drag_handle = w_handle_grid2.
+      READ TABLE t_details2 INTO ls_detail2 INDEX lw_drag_rowid.
+      IF ls_detail2-dir = 1 OR sy-subrc NE 0.
+        MESSAGE 'Please choose a remote file to download'(e01)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        CALL METHOD e_dragdropobj->abort.
+        RETURN.
+      ENDIF.
+
+      IF e_row-index IS INITIAL.
+        READ TABLE t_details1 INTO ls_detail1 INDEX 1.
+      ELSE.
+        READ TABLE t_details1 INTO ls_detail1 INDEX e_row-index.
+      ENDIF.
+      IF sy-subrc NE 0.
+        MESSAGE 'Cannot find target.. .'(e02) TYPE c_msg_success
+                 DISPLAY LIKE c_msg_error.
+        CALL METHOD e_dragdropobj->abort.
+        RETURN.
+      ENDIF.
+      IF ls_detail1-dir = 1 AND ls_detail1-name NE c_goto_parent_dir.
+        CONCATENATE ls_detail1-path ls_detail1-name c_local_slash
+                    INTO ls_detail1-path.
+      ENDIF.
+
+      PERFORM save_remote_to_local USING ls_detail2-path
+                                         ls_detail2-name
+                                         ls_detail1-path
+                                         ls_detail2-name
+                                         ls_detail2-filetransfermode
+                                         c_open_no.
+      IF ls_detail1-dir = 1 AND ls_detail1-name NE c_goto_parent_dir.
+        READ TABLE t_nodes1 INTO s_node
+                   WITH KEY path = ls_detail1-path.
+        CALL METHOD o_tree1->set_selected_node
+          EXPORTING
+            node_key = s_node-node_key.
+        PERFORM change_local_folder USING s_node-node_key.
+      ELSE.
+        PERFORM get_local_folder_detail USING ls_detail1-path.
+        PERFORM refresh_grid_display USING 1.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_select.
+    IF node_key = 'ROOT'.
+      RETURN.
+    ENDIF.
+    PERFORM change_local_folder USING node_key.
+  ENDMETHOD.
+
+  METHOD handle_select_remote.
+    PERFORM change_remote_folder USING node_key.
+  ENDMETHOD.
+
+  METHOD handle_grid_double_click.
+    DATA lw_path(1000).
+    DATA lw_filefullname TYPE string.
+    DATA : lw_index TYPE i,
+           lw_size  TYPE i.
+
+    READ TABLE t_details1 INTO s_detail1 INDEX es_row_no-row_id.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+
+    IF s_detail1-dir = 1.
+      IF s_detail1-name = c_goto_parent_dir.
+        lw_size = strlen( s_detail1-path ).
+        lw_size = lw_size - 1.
+        find_last_occurrence c_local_slash s_detail1-path(lw_size)
+                             lw_index.
+        IF sy-subrc NE 0.
+          RETURN.
+        ENDIF.
+        lw_index = lw_index + 1.
+        lw_path = s_detail1-path(lw_index).
+      ELSE.
+        CONCATENATE s_detail1-path s_detail1-name c_local_slash
+                    INTO lw_path.
+      ENDIF.
+      READ TABLE t_nodes1 INTO s_node WITH KEY path = lw_path.
+      CALL METHOD o_tree1->set_selected_node
+        EXPORTING
+          node_key = s_node-node_key.
+      PERFORM change_local_folder USING s_node-node_key.
+    ELSE.
+      CONCATENATE s_detail1-path s_detail1-name INTO lw_path.
+      lw_filefullname = lw_path.
+      CALL METHOD cl_gui_frontend_services=>execute
+        EXPORTING
+          document               = lw_filefullname
+        EXCEPTIONS
+          cntl_error             = 1
+          error_no_gui           = 2
+          bad_parameter          = 3
+          file_not_found         = 4
+          path_not_found         = 5
+          file_extension_unknown = 6
+          error_execute_failed   = 7
+          synchronous_failed     = 8
+          not_supported_by_gui   = 9
+          OTHERS                 = 10.
+      IF sy-subrc <> 0.
+        MESSAGE 'Cannot open the local file/folder'(e27)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_grid_double_click_remot.
+    DATA lw_path(1000).
+    DATA : lw_index TYPE i,
+           lw_size  TYPE i.
+
+    READ TABLE t_details2 INTO s_detail2 INDEX es_row_no-row_id.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+
+    IF s_detail2-dir = 1.
+      IF s_detail2-name = c_goto_parent_dir.
+        lw_size = strlen( s_detail2-path ).
+        lw_size = lw_size - 1.
+        find_last_occurrence o_server_command->slash
+                            s_detail2-path(lw_size) lw_index.
+        IF sy-subrc NE 0.
+          RETURN.
+        ENDIF.
+        lw_index = lw_index + 1.
+        lw_path = s_detail2-path(lw_index).
+      ELSE.
+        CONCATENATE s_detail2-path s_detail2-name o_server_command->slash
+                    INTO lw_path.
+      ENDIF.
+      READ TABLE t_nodes2 INTO s_node WITH KEY path = lw_path.
+      CALL METHOD o_tree2->set_selected_node
+        EXPORTING
+          node_key = s_node-node_key.
+      PERFORM change_remote_folder USING s_node-node_key.
+    ELSE.
+      PERFORM save_remote_to_local USING s_detail2-path s_detail2-name
+                                         '' s_detail2-name
+                                         s_detail2-filetransfermode
+                                         c_open_yes.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_grid_context_local.
+    DATA : lt_row_no TYPE lvc_t_roid,
+           ls_row_no TYPE lvc_s_roid.
+
+    CALL METHOD e_object->clear.
+
+    CALL METHOD o_grid1->get_selected_rows
+      IMPORTING
+        et_row_no = lt_row_no.
+
+    READ TABLE lt_row_no INTO ls_row_no INDEX 1.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+    READ TABLE t_details1 INTO s_detail1 INDEX ls_row_no-row_id.
+    IF sy-subrc NE 0 OR s_detail1-name = c_goto_parent_dir.
+      RETURN.
+    ENDIF.
+
+    IF s_detail1-dir = 0.
+      CALL METHOD e_object->add_function
+        EXPORTING
+          text  = 'Open'(m01)
+          icon  = '@10@'
+          fcode = 'LF_OPEN'.
+      CALL METHOD e_object->add_function
+        EXPORTING
+          text  = 'Open as.. .'(m34)
+          icon  = '@10@'
+          fcode = 'LF_OPENAS'.
+      CALL METHOD e_object->add_function
+        EXPORTING
+          text  = 'Open folder in Explorer'(m02)
+          icon  = '@FO@'
+          fcode = 'LF_OPEN_PARENT'.
+    ELSE.
+      CALL METHOD e_object->add_function
+        EXPORTING
+          text  = 'Open folder in Explorer'(m02)
+          icon  = '@FO@'
+          fcode = 'LF_OPEN'.
+    ENDIF.
+    CALL METHOD e_object->add_function
+      EXPORTING
+        text  = 'Copy path to clipboard'(m03)
+        icon  = '@2U@'
+        fcode = 'LF_COPYPATH'.
+  ENDMETHOD.
+
+  METHOD handle_grid_context.
+    DATA : lt_row_no        TYPE lvc_t_roid,
+           ls_row_no        TYPE lvc_s_roid,
+           lw_pos           TYPE i,
+           lw_extension(10) TYPE c.
+
+    CALL METHOD o_grid2->get_selected_rows
+      IMPORTING
+        et_row_no = lt_row_no.
+
+    CALL METHOD e_object->clear.
+
+    READ TABLE lt_row_no INTO ls_row_no INDEX 1.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+    READ TABLE t_details2 INTO s_detail2 INDEX ls_row_no-row_id.
+    IF sy-subrc NE 0 OR s_detail2-name = c_goto_parent_dir.
+      RETURN.
+    ENDIF.
+
+    IF s_detail2-dir = 0.
+      IF s_auth-download = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Open'(m01)
+            icon  = '@10@'
+            fcode = 'RF_OPEN'.
+      ENDIF.
+      IF s_auth-download = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Open as text'(m04)
+            icon  = '@0P@'
+            fcode = 'RF_OPEN_TXT'.
+      ENDIF.
+      IF s_auth-download = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Open as.. .'(m34)
+            icon  = '@10@'
+            fcode = 'RF_OPENAS'.
+      ENDIF.
+    ENDIF.
+
+    IF s_auth-copy_path = abap_true.
+      CALL METHOD e_object->add_function
+        EXPORTING
+          text  = 'Copy path to clipboard'(m03)
+          icon  = '@2U@'
+          fcode = 'RF_COPYPATH'.
+    ENDIF.
+
+    CALL METHOD e_object->add_separator.
+
+    IF s_auth-zip = abap_true.
+      CALL METHOD e_object->add_function
+        EXPORTING
+          text  = 'Compress'(m05)
+          icon  = '@12@'
+          fcode = 'RF_COMPRESS'.
+    ENDIF.
+
+    IF s_detail2-dir = 0.
+      IF s_auth-rename_file = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Rename File'(m06)
+            icon  = '@G4@'
+            fcode = 'RF_RENAME'.
+      ENDIF.
+      IF s_auth-duplicate_file = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Duplicate File'(m07)
+            icon  = '@14@'
+            fcode = 'RF_DUPLICATE'.
+      ENDIF.
+      IF s_auth-delete_file = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Delete File'(m08)
+            icon  = '@11@'
+            fcode = 'RF_DELETE'.
+      ENDIF.
+    ELSE.
+      IF s_auth-rename_folder = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Rename Folder'(m09)
+            icon  = '@G4@'
+            fcode = 'RF_RENAME'.
+      ENDIF.
+      IF s_auth-duplicate_folder = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Duplicate Folder'(m10)
+            icon  = '@14@'
+            fcode = 'RF_DUPLICATE'.
+      ENDIF.
+      IF s_auth-delete_folder = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Delete Folder'(m11)
+            icon  = '@11@'
+            fcode = 'RF_DELETE_FOLDER'.
+      ENDIF.
+    ENDIF.
+
+    IF s_auth-unzip = abap_true.
+      IF s_detail2-dir = 0.
+        find_last_occurrence '.' s_detail2-name lw_pos.
+        IF sy-subrc = 0.
+          lw_extension = s_detail2-name+lw_pos.
+          TRANSLATE lw_extension TO LOWER CASE.
+          IF lw_extension = '.zip' OR lw_extension = '.bz2'
+          OR lw_extension = '.tar' OR lw_extension = '.gz'.
+            CALL METHOD e_object->add_function
+              EXPORTING
+                text  = 'Uncompress'(m12)
+                icon  = '@12@'
+                fcode = 'RF_UNCOMPRESS'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF o_server_command->attrib_mode = lif_server_command=>c_attrmode_chmod
+    OR o_server_command->attrib_mode = lif_server_command=>c_attrmode_attrib.
+      IF s_auth-chmod = abap_true.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Change Attributes'(m25)
+            icon  = '@9Y@'
+            fcode = 'RF_CHMOD'.
+      ELSE.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            text  = 'Display Attributes'(m26)
+            icon  = '@9Y@'
+            fcode = 'RF_CHMOD'.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+*----------------------------------------------------------------------*
+* Continuation of CLASS lcl_application IMPLEMENTATION
+*----------------------------------------------------------------------*
+
+  METHOD handle_toolbar.
+    DATA : ls_toolbar TYPE stb_button,
+           ls_detail2 LIKE s_detail2.
+
+    REFRESH e_object->mt_toolbar.
+
+    CLEAR ls_toolbar.
+    ls_toolbar-function = 'FORCETM'.
+    ls_toolbar-icon = '@AA@'.
+    ls_toolbar-quickinfo = 'Choose Transfer Mode (Auto/asc/bin)'(m14).
+    ls_toolbar-text = 'Transfer Mode'(m13).
+    ls_toolbar-butn_type = 2.
+    ls_toolbar-disabled = space.
+    APPEND ls_toolbar TO e_object->mt_toolbar.
+
+    CLEAR ls_toolbar.
+    ls_toolbar-function = 'REFRESH_DIR'.
+    ls_toolbar-icon = '@42@'.
+    ls_toolbar-quickinfo = 'Refresh current folder'(m16).
+    ls_toolbar-text = 'Refresh'(m15).
+    ls_toolbar-butn_type = 0.
+    ls_toolbar-disabled = space.
+    APPEND ls_toolbar TO e_object->mt_toolbar.
+
+    IF s_auth-shortcut = abap_true.
+      IF NOT t_shortcuts IS INITIAL OR s_auth-create_shortcut = abap_true.
+        CLEAR ls_toolbar.
+        ls_toolbar-function = 'SHORTCUTS'.
+        ls_toolbar-icon = '@8T@'.
+        ls_toolbar-text = 'Shortcuts'(m17).
+        ls_toolbar-butn_type = 2.
+        ls_toolbar-disabled = space.
+        APPEND ls_toolbar TO e_object->mt_toolbar.
+      ENDIF.
+    ENDIF.
+
+    IF s_auth-paste_path = abap_true.
+      CLEAR ls_toolbar.
+      ls_toolbar-function = 'GOTOPATH'.
+      ls_toolbar-icon = '@2V@'.
+      ls_toolbar-text = 'Open path from clipboard'(m18).
+      ls_toolbar-butn_type = 0.
+      ls_toolbar-disabled = space.
+      APPEND ls_toolbar TO e_object->mt_toolbar.
+    ENDIF.
+
+    IF s_auth-create_folder = abap_true.
+      CLEAR ls_toolbar.
+      ls_toolbar-function = 'NEWFOLDER'.
+      ls_toolbar-icon = '@0Y@'.
+      ls_toolbar-text = 'Create folder'(m19).
+      ls_toolbar-butn_type = 0.
+      ls_toolbar-disabled = space.
+      APPEND ls_toolbar TO e_object->mt_toolbar.
+    ENDIF.
+
+    IF s_auth-download = abap_true.
+      CLEAR ls_toolbar.
+      ls_toolbar-function = 'RF_DOWNLOAD'.
+      ls_toolbar-icon = '@MC@'.
+      ls_toolbar-text = 'Download'(m20).
+      ls_toolbar-butn_type = 0.
+      ls_toolbar-disabled = space.
+      APPEND ls_toolbar TO e_object->mt_toolbar.
+    ENDIF.
+
+    IF s_auth-upload = abap_true.
+      CLEAR ls_toolbar.
+      ls_toolbar-function = 'LF_UPLOAD'.
+      ls_toolbar-icon = '@M8@'.
+      ls_toolbar-text = 'Upload'(m21).
+      ls_toolbar-butn_type = 0.
+      ls_toolbar-disabled = space.
+      APPEND ls_toolbar TO e_object->mt_toolbar.
+    ENDIF.
+
+    IF s_auth-dirsize = abap_true
+    AND s_customize-autodirsize = space.
+      CLEAR ls_toolbar.
+      ls_toolbar-function = 'DIRSIZE'.
+      ls_toolbar-icon = '@0U@'.
+      ls_toolbar-text = 'Folders size'(m28).
+      ls_toolbar-butn_type = 0.
+      ls_toolbar-disabled = space.
+      APPEND ls_toolbar TO e_object->mt_toolbar.
+    ENDIF.
+
+    CLEAR ls_toolbar.
+    ls_toolbar-function = cl_gui_alv_grid=>mc_fc_current_variant.
+    ls_toolbar-icon = icon_alv_variants.
+    ls_toolbar-text = 'Grid options'(m33).
+    ls_toolbar-butn_type = 0.
+    ls_toolbar-disabled = space.
+    APPEND ls_toolbar TO e_object->mt_toolbar.
+
+    READ TABLE t_details2 INTO ls_detail2 INDEX 1.
+    IF sy-subrc = 0
+    AND ( s_customize-root_path_len LE 1
+          OR s_customize-root_path NE
+             ls_detail2-path(s_customize-root_path_len) )
+    AND ls_detail2-path(1) = o_server_command->slash
+    AND ls_detail2-path+1(1) = o_server_command->slash.
+      CLEAR ls_toolbar.
+      READ TABLE t_server_link TRANSPORTING NO FIELDS
+                 WITH KEY low = ls_detail2-path.
+      IF sy-subrc = 0.
+        ls_toolbar-icon = '@CR@'.
+        ls_toolbar-text = 'Forget server connexion'(m30).
+      ELSE.
+        ls_toolbar-icon = '@CQ@'.
+        ls_toolbar-text = 'Remember server connexion'(m29).
+      ENDIF.
+      ls_toolbar-function = 'REMEMBER_SERVER'.
+      ls_toolbar-butn_type = 0.
+      ls_toolbar-disabled = space.
+      APPEND ls_toolbar TO e_object->mt_toolbar.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_menu_button.
+    DATA : lw_check,
+           lw_fcode TYPE ui_func,
+           lw_text  TYPE gui_text.
+
+    CASE e_ucomm.
+      WHEN 'FORCETM'.
+        IF w_force_transfer_mode IS INITIAL.
+          lw_check = abap_true.
+        ELSE.
+          lw_check = space.
+        ENDIF.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            fcode   = 'TM_AUTO'
+            text    = 'Auto'(m22)
+            checked = lw_check.
+
+        IF w_force_transfer_mode = c_asc.
+          lw_check = abap_true.
+        ELSE.
+          lw_check = space.
+        ENDIF.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            fcode   = 'TM_ASC'
+            text    = 'Ascii (text mode)'(m23)
+            checked = lw_check.
+
+        IF w_force_transfer_mode = c_bin.
+          lw_check = abap_true.
+        ELSE.
+          lw_check = space.
+        ENDIF.
+        CALL METHOD e_object->add_function
+          EXPORTING
+            fcode   = 'TM_BIN'
+            text    = 'Binary mode'(m24)
+            checked = lw_check.
+
+      WHEN 'SHORTCUTS'.
+        LOOP AT t_shortcuts INTO s_shortcut.
+          lw_fcode = sy-tabix.
+          CONDENSE lw_fcode NO-GAPS.
+          CONCATENATE 'SH_' lw_fcode INTO lw_fcode.
+          lw_text = s_shortcut-aliass.
+          CALL METHOD e_object->add_function
+            EXPORTING
+              fcode = lw_fcode
+              text  = lw_text.
+        ENDLOOP.
+        IF s_auth-create_shortcut = abap_true.
+          IF sy-subrc = 0.
+            CALL METHOD e_object->add_separator.
+          ENDIF.
+          CALL METHOD e_object->add_function
+            EXPORTING
+              fcode = 'SHORTCUT_CREATE'
+              text  = 'Create shortcut'(m27).
+        ENDIF.
+        IF s_auth-delete_shortcut = abap_true
+        AND NOT t_shortcuts IS INITIAL.
+          IF s_auth-create_shortcut NE abap_true.
+            CALL METHOD e_object->add_separator.
+          ENDIF.
+          CALL METHOD e_object->add_function
+            EXPORTING
+              fcode = 'SHORTCUT_DELETE'
+              text  = 'Delete shortcut'(m32).
+        ENDIF.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD handle_user_command.
+    DATA : lt_row_no  TYPE lvc_t_roid,
+           ls_row_no  TYPE lvc_s_roid,
+           lw_name    LIKE s_detail2-name,
+           lw_nodekey LIKE s_node-node_key,
+           ls_detail1 LIKE s_detail1,
+           ls_detail2 LIKE s_detail2,
+           ls_node    LIKE s_node,
+           lw_string  TYPE string,
+           lw_index   TYPE i.
+
+    IF e_ucomm(3) = 'RF_'.
+      CALL METHOD o_grid2->get_selected_rows
+        IMPORTING
+          et_row_no = lt_row_no.
+
+      CLEAR ls_detail2.
+      READ TABLE lt_row_no INTO ls_row_no INDEX 1.
+      IF sy-subrc = 0.
+        READ TABLE t_details2 INTO ls_detail2 INDEX ls_row_no-row_id.
+      ENDIF.
+      IF sy-subrc NE 0 OR ls_detail2-name = c_goto_parent_dir.
+        MESSAGE 'Please choose a remote item'(e05)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    IF e_ucomm(3) = 'LF_'.
+      CALL METHOD o_grid1->get_selected_rows
+        IMPORTING
+          et_row_no = lt_row_no.
+
+      CLEAR ls_detail1.
+      READ TABLE lt_row_no INTO ls_row_no INDEX 1.
+      IF sy-subrc = 0.
+        READ TABLE t_details1 INTO ls_detail1 INDEX ls_row_no-row_id.
+      ENDIF.
+      IF sy-subrc NE 0 OR ls_detail1-name = c_goto_parent_dir.
+        MESSAGE 'Please choose a local item'(e06)
+                TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    CASE e_ucomm.
+      WHEN 'RF_DOWNLOAD'.
+        IF ls_detail2-dir = 1.
+          MESSAGE 'Please choose a remote file to download'(e01)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+          RETURN.
+        ENDIF.
+        CALL METHOD o_tree1->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+        READ TABLE t_nodes1 INTO ls_node WITH KEY node_key = lw_nodekey.
+        IF sy-subrc NE 0 OR lw_nodekey = 'ROOT'.
+          MESSAGE 'Please choose a local folder to download'(e08)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+          RETURN.
+        ENDIF.
+        PERFORM save_remote_to_local USING ls_detail2-path
+                                           ls_detail2-name
+                                           ls_node-path ls_detail2-name
+                                           ls_detail2-filetransfermode
+                                           c_open_no.
+        PERFORM get_local_folder_detail USING ls_node-path.
+        PERFORM refresh_grid_display USING 1.
+
+      WHEN 'LF_UPLOAD'.
+        IF ls_detail1-dir = 1.
+          MESSAGE 'Please choose a local file to upload'(e03)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+          RETURN.
+        ENDIF.
+        CALL METHOD o_tree2->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+        READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = lw_nodekey.
+        IF sy-subrc NE 0.
+          MESSAGE 'Please choose a remote folder to upload'(e10)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+          RETURN.
+        ENDIF.
+        PERFORM save_local_to_remote USING ls_detail1-path
+                                           ls_detail1-name
+                                           ls_node-path ls_detail1-name
+                                           ls_detail1-filetransfermode.
+        PERFORM get_remote_folder_detail USING ls_node-path.
+        PERFORM refresh_grid_display USING 2.
+
+      WHEN 'RF_OPEN'.
+        PERFORM save_remote_to_local USING ls_detail2-path
+                                           ls_detail2-name
+                                           '' ls_detail2-name
+                                           ls_detail2-filetransfermode
+                                           c_open_yes.
+
+      WHEN 'RF_OPEN_TXT'.
+        CONCATENATE s_detail2-name '. TXT' INTO lw_name.
+        PERFORM save_remote_to_local USING ls_detail2-path
+                                           ls_detail2-name
+                                           '' lw_name
+                                           ls_detail2-filetransfermode
+                                           c_open_yes.
+
+      WHEN 'RF_OPENAS'.
+        PERFORM save_remote_to_local USING ls_detail2-path
+                                           ls_detail2-name
+                                           '' ls_detail2-name
+                                           ls_detail2-filetransfermode
+                                           c_open_as.
+
+      WHEN 'LF_OPEN' OR 'LF_OPEN_PARENT'.
+        IF e_ucomm = 'LF_OPEN'.
+          CONCATENATE s_detail1-path s_detail1-name INTO lw_name.
+          IF ls_detail1-dir = 1.
+            CONCATENATE lw_name c_local_slash INTO lw_name.
+          ENDIF.
+        ELSE.
+          lw_name = s_detail1-path.
+        ENDIF.
+        lw_string = lw_name.
+
+        CALL METHOD cl_gui_frontend_services=>execute
+          EXPORTING
+            document               = lw_string
+          EXCEPTIONS
+            cntl_error             = 1
+            error_no_gui           = 2
+            bad_parameter          = 3
+            file_not_found         = 4
+            path_not_found         = 5
+            file_extension_unknown = 6
+            error_execute_failed   = 7
+            synchronous_failed     = 8
+            not_supported_by_gui   = 9
+            OTHERS                 = 10.
+        IF sy-subrc <> 0.
+          MESSAGE 'Cannot open the local file/folder'(e27)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        ENDIF.
+
+      WHEN 'LF_OPENAS'.
+        CONCATENATE s_detail1-path s_detail1-name INTO lw_name.
+        lw_string = lw_name.
+        CONCATENATE 'SHELL32. DLL,OpenAs_RunDLL' lw_string
+                    INTO lw_string SEPARATED BY space.
+        CALL METHOD cl_gui_frontend_services=>execute
+          EXPORTING
+            application            = 'RUNDLL32.EXE'
+            parameter              = lw_string
+          EXCEPTIONS
+            cntl_error             = 1
+            error_no_gui           = 2
+            bad_parameter          = 3
+            file_not_found         = 4
+            path_not_found         = 5
+            file_extension_unknown = 6
+            error_execute_failed   = 7
+            synchronous_failed     = 8
+            not_supported_by_gui   = 9
+            OTHERS                 = 10.
+        IF sy-subrc <> 0.
+          MESSAGE 'Cannot open the local file/folder'(e27)
+                  TYPE c_msg_success DISPLAY LIKE c_msg_error.
+        ENDIF.
+
+      WHEN 'RF_COMPRESS'.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM compress_item USING lw_name.
+        PERFORM get_remote_folder_detail USING ls_detail2-path.
+        PERFORM refresh_grid_display USING 2.
+
+      WHEN 'RF_UNCOMPRESS'.
+        PERFORM uncompress_file USING ls_detail2-path ls_detail2-name.
+        READ TABLE t_nodes2 INTO ls_node
+             WITH KEY path = ls_detail2-path.
+        PERFORM refresh_tree2 USING ls_node.
+
+      WHEN 'RF_DELETE'.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM delete_file USING lw_name.
+        PERFORM get_remote_folder_detail USING ls_detail2-path.
+        PERFORM refresh_grid_display USING 2.
+
+      WHEN 'RF_DUPLICATE'.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM duplicate_item USING lw_name ls_detail2-dir.
+        IF ls_detail2-dir = 1.
+          READ TABLE t_nodes2 INTO ls_node
+                     WITH KEY path = ls_detail2-path.
+          PERFORM refresh_tree2 USING ls_node.
+        ELSE.
+          PERFORM get_remote_folder_detail USING ls_detail2-path.
+          PERFORM refresh_grid_display USING 2.
+        ENDIF.
+
+      WHEN 'RF_RENAME'.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM rename_item USING ls_detail2-path ls_detail2-name
+                ls_detail2-dir.
+        IF ls_detail2-dir = 1.
+          READ TABLE t_nodes2 INTO ls_node
+                     WITH KEY path = ls_detail2-path.
+          PERFORM refresh_tree2 USING ls_node.
+        ELSE.
+          PERFORM get_remote_folder_detail USING ls_detail2-path.
+          PERFORM refresh_grid_display USING 2.
+        ENDIF.
+
+      WHEN 'RF_DELETE_FOLDER'.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM delete_folder USING lw_name.
+        READ TABLE t_nodes2 INTO ls_node
+                   WITH KEY path = ls_detail2-path.
+        PERFORM refresh_tree2 USING ls_node.
+
+      WHEN 'RF_COPYPATH'.
+        CONCATENATE ls_detail2-path ls_detail2-name INTO lw_name.
+        PERFORM clipboard_export USING lw_name 1.
+
+      WHEN 'LF_COPYPATH'.
+        CONCATENATE ls_detail1-path ls_detail1-name INTO lw_name.
+        PERFORM clipboard_export USING lw_name 0.
+
+      WHEN 'GOTOPATH'.
+        PERFORM clipboard_import.
+
+      WHEN 'TM_AUTO'.
+        CLEAR w_force_transfer_mode.
+
+      WHEN 'TM_ASC'.
+        w_force_transfer_mode = c_asc.
+
+      WHEN 'TM_BIN'.
+        w_force_transfer_mode = c_bin.
+
+      WHEN 'DIRSIZE'.
+        PERFORM get_remote_folder_size.
+        PERFORM refresh_grid_display USING 2.
+
+      WHEN 'REFRESH_DIR'.
+        CALL METHOD o_tree2->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+        READ TABLE t_nodes2 INTO s_node WITH KEY node_key = lw_nodekey.
+        PERFORM get_remote_folder_detail USING s_node-path.
+        PERFORM refresh_grid_display USING 2.
+
+      WHEN 'NEWFOLDER'.
+        CALL METHOD o_tree2->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+        READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = lw_nodekey.
+        PERFORM create_folder USING ls_node-path.
+        PERFORM refresh_tree2 USING ls_node.
+
+      WHEN 'SHORTCUT_CREATE'.
+        CALL METHOD o_tree2->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+        READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = lw_nodekey.
+        PERFORM create_shortcut USING ls_node-path.
+
+      WHEN 'SHORTCUT_DELETE'.
+        PERFORM delete_shortcut.
+
+      WHEN 'RF_CHMOD'.
+        CALL METHOD o_tree2->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+
+        IF o_server_command->attrib_mode = lif_server_command=>c_attrmode_chmod.
+          PERFORM chmod_dialog USING ls_detail2-path ls_detail2-name
+                                ls_detail2-mode ls_detail2-owner
+                                lw_nodekey.
+        ELSEIF o_server_command->attrib_mode = lif_server_command=>c_attrmode_attrib.
+          PERFORM attrib_dialog USING ls_detail2-path ls_detail2-name
+                                 ls_detail2-attrs lw_nodekey.
+        ENDIF.
+
+      WHEN 'REMEMBER_SERVER'.
+        CALL METHOD o_tree2->get_selected_node
+          IMPORTING
+            node_key = lw_nodekey.
+        READ TABLE t_nodes2 INTO ls_node WITH KEY node_key = lw_nodekey.
+        PERFORM manage_server_link USING ls_node-path.
+        PERFORM refresh_grid_display USING 2.
+
+      WHEN OTHERS.
+        IF e_ucomm(3) = 'SH_'.
+          lw_index = e_ucomm+3.
+          READ TABLE t_shortcuts INTO s_shortcut INDEX lw_index.
+          IF sy-subrc NE 0.
+            RETURN.
+          ENDIF.
+          PERFORM goto_shortcut USING s_shortcut-dirname 1 space.
+        ENDIF.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD handle_chmod_ok.
+    w_chmod_ok = abap_true.
+    PERFORM process_chmod_result.
+    IF o_dialog_chmod IS BOUND.
+      o_dialog_chmod->free( ).
+      FREE o_dialog_chmod.
+      FREE o_pbox_chmod.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD handle_chmod_cancel.
+    w_chmod_ok = abap_false.
+    IF o_dialog_chmod IS BOUND.
+      o_dialog_chmod->free( ).
+      FREE o_dialog_chmod.
+      FREE o_pbox_chmod.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_windows_server IMPLEMENTATION
+*----------------------------------------------------------------------*
+CLASS lcl_windows_server IMPLEMENTATION.
+  METHOD create_folder.
+    CONCATENATE 'mkdir' i_newfolder INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD copy.
+    CASE i_mode.
+      WHEN lif_server_command~c_copymode_file.
+        CONCATENATE 'copy' i_source i_target
+                    INTO last_command SEPARATED BY space.
+      WHEN lif_server_command~c_copymode_folder.
+        CONCATENATE 'xcopy /i /e' i_source i_target
+                    INTO last_command SEPARATED BY space.
+    ENDCASE.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD delete.
+    CASE i_mode.
+      WHEN lif_server_command~c_copymode_file.
+        CONCATENATE 'del' i_source INTO last_command
+                    SEPARATED BY space.
+      WHEN lif_server_command~c_copymode_folder.
+        CONCATENATE 'del /q/s' i_source INTO last_command
+                    SEPARATED BY space.
+        CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+        commit( ).
+        CONCATENATE 'rmdir' i_source INTO last_command
+                    SEPARATED BY space.
+    ENDCASE.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD move.
+    CONCATENATE 'move' i_source i_target INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD rename.
+    CONCATENATE 'move' i_source i_target INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD change_attrib.
+    CONCATENATE 'attrib' i_params i_file INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command.
+    e_subrc = sy-subrc.
+  ENDMETHOD.
+
+  METHOD compress.
+    DATA: lt_tab TYPE swxmlcont,
+          ls_tab TYPE x255.
+
+    DATA: lw_zip_content   TYPE xstring,
+          lw_zip_file(255) TYPE c,
+          lw_content       TYPE xstring,
+          lo_zip           TYPE REF TO cl_abap_zip.
+    CLEAR e_subrc.
+
+    CREATE OBJECT lo_zip.
+
+    CLEAR lw_content.
+    OPEN DATASET i_file FOR INPUT IN BINARY MODE.
+    READ DATASET i_file INTO lw_content.
+    CLOSE DATASET i_file.
+
+    lo_zip->add( name    = i_file
+                 content = lw_content ).
+
+    CLEAR lw_content.
+
+    lw_zip_content = lo_zip->save( ).
+
+    CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+      EXPORTING
+        buffer     = lw_zip_content
+      TABLES
+        binary_tab = lt_tab.
+
+    CONCATENATE i_file '.zip' INTO lw_zip_file.
+    OPEN DATASET lw_zip_file FOR OUTPUT IN BINARY MODE.
+    LOOP AT lt_tab INTO ls_tab.
+      TRANSFER ls_tab TO lw_zip_file.
+    ENDLOOP.
+    CLOSE DATASET lw_zip_file.
+  ENDMETHOD.
+
+  METHOD uncompress.
+    CLEAR e_subrc.
+    MESSAGE 'Uncompression not yet managed'(e26) TYPE c_msg_success
+            DISPLAY LIKE c_msg_error.
+  ENDMETHOD.
+
+  METHOD get_attrib.
+    DATA: ls_result TYPE char255,
+          lt_result TYPE STANDARD TABLE OF char255.
+    CLEAR e_attrib.
+
+    CONCATENATE 'attrib' i_file INTO last_command
+                SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command
+                  ID 'TAB'     FIELD lt_result.
+    READ TABLE lt_result INTO ls_result INDEX 1.
+    IF sy-subrc = 0.
+      e_attrib = ls_result(10).
+      CONDENSE e_attrib NO-GAPS.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD file_protect.
+    IF i_file IS NOT INITIAL AND i_file(1) NE '"'.
+      CONCATENATE '"' i_file '"' INTO e_file.
+    ELSE.
+      e_file = i_file.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD drive_list.
+    DATA : lw_line(150) TYPE c,
+           lt_tab       LIKE TABLE OF lw_line,
+           ls_drive     LIKE LINE OF e_drive_table.
+
+    REFRESH e_drive_table.
+    last_command = 'wmic logicaldisk get Name,DriveType,VolumeName'.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command
+               ID 'TAB'     FIELD lt_tab.
+    DELETE lt_tab INDEX 1.
+    LOOP AT lt_tab INTO lw_line.
+      CLEAR ls_drive.
+      ls_drive-drive = lw_line+11(2).
+      ls_drive-type = lw_line(1).
+      ls_drive-desc = lw_line+17(12).
+      IF ls_drive-desc IS INITIAL.
+        CASE ls_drive-type.
+          WHEN c_drivetypewin_usb.
+            ls_drive-desc = 'Removable Drive (#: )'(c05).
+          WHEN c_drivetypewin_hdd.
+            ls_drive-desc = 'Local Disk (#:)'(c02).
+          WHEN c_drivetypewin_cd.
+            ls_drive-desc = 'CDROM Drive (#:)'(c03).
+          WHEN c_drivetypewin_remote.
+            ls_drive-desc = 'Remote Drive (#:)'(c04).
+          WHEN OTHERS.
+            ls_drive-desc = 'Unknown (#:)'(c06).
+        ENDCASE.
+      ELSE.
+        CONCATENATE ls_drive-desc '(#:)' INTO ls_drive-desc
+                    SEPARATED BY space.
+      ENDIF.
+      REPLACE FIRST OCCURRENCE OF c_wildcard IN ls_drive-desc
+              WITH ls_drive-drive(1).
+      IF ls_drive-type CO '1234567 '.
+        APPEND ls_drive TO e_drive_table.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD commit.
+    WAIT UP TO 1 SECONDS.
+  ENDMETHOD.
+
+  METHOD get_folder_size.
+    CLEAR e_size.
+    DATA : lw_line(150)  TYPE c,
+           lt_tab        LIKE TABLE OF lw_line,
+           lw_line_count TYPE i.
+
+    CONCATENATE 'dir /s /-C' i_file INTO last_command SEPARATED BY space.
+    CALL 'SYSTEM' ID 'COMMAND' FIELD last_command
+               ID 'TAB'     FIELD lt_tab.
+
+    DESCRIBE TABLE lt_tab LINES lw_line_count.
+    lw_line_count = lw_line_count - 1.
+    IF lw_line_count LT 1.
+      RETURN.
+    ENDIF.
+    READ TABLE lt_tab INTO lw_line INDEX lw_line_count.
+
+    SPLIT lw_line AT space INTO TABLE lt_tab.
+    DESCRIBE TABLE lt_tab LINES lw_line_count.
+    LOOP AT lt_tab INTO lw_line.
+      CHECK lw_line IS INITIAL.
+      DELETE lt_tab.
+    ENDLOOP.
+
+    READ TABLE lt_tab INTO lw_line INDEX 3.
+    IF lw_line CO ' 0123456789'.
+      e_size = lw_line.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
